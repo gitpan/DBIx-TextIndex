@@ -5,7 +5,7 @@ use DBI;
 use DBIx::TextIndex;
 
 if (defined $ENV{DBI_DSN}) {
-    plan tests => 4;
+    plan tests => 5;
 } else {
     plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
 }
@@ -65,5 +65,6 @@ foreach my $term (@terms) {
 
 is_deeply(\@result_docs, \@top_docs);
 
+ok( (! $index->indexed(105)) );
 
 $dbh->disconnect;

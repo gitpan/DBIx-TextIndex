@@ -2,7 +2,7 @@ package DBIx::TextIndex::DBD::SQLite;
 
 use strict;
 
-our $VERSION = '0.24';
+our $VERSION = '0.25';
 
 use base qw(DBIx::TextIndex::DBD);
 

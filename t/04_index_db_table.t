@@ -5,7 +5,7 @@ use DBI;
 use DBIx::TextIndex;
 
 if (defined $ENV{DBI_DSN}) {
-    plan tests => 9;
+    plan tests => 13;
 } else {
     plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
 }
@@ -37,6 +37,12 @@ ok( $index->add_doc(1) == 1 );
 ok( $index->add_document(2, 3, 4) == 3 );
 ok( $index->add_doc([5 .. 100]) == 96 );
 ok( $index->add_doc([101 .. $max_doc_id]) == 126 );
+
+ok( $index->indexed(1) );
+ok( $index->indexed(100) );
+ok( $index->indexed(226) );
+
+ok( $index->last_indexed_key == 226 );
 
 is_deeply( [ $index->all_doc_ids ], [1 .. 226] );
 

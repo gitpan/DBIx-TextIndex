@@ -2,7 +2,7 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.24';
+our $VERSION = '0.25';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -620,10 +620,6 @@ sub search {
     $self->_resolve_mask;
     $self->_boolean_search;
 
-    print "Result Vector:\n";
-    print $self->{RESULT_VECTOR}->to_Enum();
-    print "\n";
-
     if ($args->{unscored_search}) {
 	my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
 	throw_query( error => $ERROR{'no_results'} ) if $#result_docs < 0;
@@ -654,11 +650,6 @@ sub _boolean_search {
 	my $fno = $query_fnos[0];
 	$self->{RESULT_VECTOR} =
 	    $self->_boolean_search_field($fno, $self->{QUERY}->[$fno]);
-
-	print "A:\n";
-	print $self->{RESULT_VECTOR}->to_Enum();
-	print "\n";
-
     } else {
 	my $max_id = $self->max_indexed_id + 1;
 	$self->{RESULT_VECTOR} = Bit::Vector->new($max_id);
@@ -686,11 +677,6 @@ sub _boolean_search {
 	my @freq_sort = sort {$f_t{$a} <=> $f_t{$b}} keys %f_t;
 	$self->{TERMS}->[$fno] = \@freq_sort;
     }
-
-    print "B:\n";
-    print $self->{RESULT_VECTOR}->to_Enum();
-    print "\n";
-
 }
 
 sub _boolean_search_field {
@@ -1049,10 +1035,34 @@ sub initialize {
     return $self;
 }
 
-sub max_indexed_id {
+# FIXME: probably breaks if max_indexed_id has been removed. Test.
+sub last_indexed_key {
+    my $self = shift;
+    my $doc_keys = $self->{DB}->fetch_doc_keys([ $self->{MAX_INDEXED_ID} ]);
 
+    if (ref $doc_keys) {
+	return $doc_keys->[0];
+    } else {
+	return undef;
+    }
+}
+
+sub indexed {
+    my $self = shift;
+    my $doc_key = shift;
+
+    my $doc_ids = $self->{DB}->fetch_doc_ids([$doc_key]);
+    if (ref $doc_ids) {
+	return $doc_ids->[0];
+    } else {
+	return 0;
+    }
+}
+
+sub max_indexed_id {
     my $self = shift;
     my $max_indexed_id = shift;
+
     if (defined $max_indexed_id) {
 	$self->_update_collection_info('max_indexed_id', $max_indexed_id);
 	$self->{C}->max_indexed_id($max_indexed_id);
@@ -2237,6 +2247,41 @@ FIXME: This section is incomplete.
 
 Searches are case insensitive.
 
+=head2 Boolean Operations
+
+DBIx::TextIndex supports several variations of boolean operators. The
+C<AND>, C<OR>, and C<NOT> operators are upper case only.
+
+=over 4
+
+=item OR, ||
+
+ cat OR dog
+ cat || dog
+
+=item AND, &&, +
+
+ cat AND dog
+ cat && dog
+ +cat +dog
+
+=item NOT, !, -
+
+ cat NOT dog
+ cat ! dog
+ cat -dog
+
+=back
+
+=head2 Grouping With Parentheses
+
+Parentheses may be used in conjunction with other operators to form
+complex boolean expressions:
+
+ (cat OR dog) AND goat
+
+ (cat OR dog) AND (goat OR chicken)
+
 =head2 Phrase Searches
 
 Enclose phrases in double quotes:
@@ -2278,7 +2323,7 @@ C<"+"> at the end matches singular or plural form (naively, by
   car+    - "car", "cars"
 
 By default, at least 1 alphanumeric character must appear before the
-first wildcard character.  The option C<min_wildcard_length> can
+first wildcard character.  The option C<min_wildcard_length> can be
 changed to require more alphanumeric characters before the first
 wildcard.
 
@@ -2449,6 +2494,36 @@ Setting this higher will increase indexing speed, but also increase
 memory usage. In tests, the default setting of 20000 when indexing
 10KB documents results in about 500MB of memory used.
 
+=item min_wildcard_length
+
+ min_wildcard_length => 1
+
+Defines the number of characters that must appear at the beginning of
+a search term before the first wildcard character appears.  Must be at
+least one character.
+
+ d*       - is a valid search if min_wildcard_length = 1
+
+If C<min_wildcard_length> = 3:
+
+ do*      - invalid search
+ dog*     - valid search
+
+=item max_wildcard_term_expansion
+
+ max_wildcard_term_expansion => 30
+
+Internally, a wildcard search is expanded into an OR clause: C<car*>
+is turned into C<(car OR cars OR careful OR cartel OR ...)>.  If a
+search too broad, the wildcard term will expand into a query of
+hundreds or thousands of terms. For example, the query containing
+C<"a*"> would return any documents that contain a word starting with
+"a".
+
+The C<max_wildcard_term_expansion> places a hard limit on the number
+of terms in the expansion. An exception is thrown if the limit is
+exceeded.
+ 
 =item doc_key_sql_type
 
  doc_key_sql_type => varchar
@@ -2591,6 +2666,20 @@ bad or no results are found.
      print "Here's all the doc ids:\n";
      map { print "$_\n" } @$doc_ids;
  }
+
+=head2 C<indexed()>
+
+ if ($index->indexed($doc_key)) { ... }
+
+Returns a number greater than zero if C<$index> contains C<$doc_key>.
+Returns C<0> if C<$doc_key> is not found.
+
+=head2 C<last_indexed_key()>
+
+ $key = $index->last_indexed_key()
+
+Returns the document key last added to the index. Useful for keeping
+track of documents added to the index in some sequential order
 
 =head2 C<optimize()>
 

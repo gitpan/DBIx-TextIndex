@@ -2,6 +2,11 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.25
+    New methods indexed() and last_indexed_key()
+
+    Removed a few stray print statements 
+
 0.24
     WARNING: indexes must be recreated, format has changed
 

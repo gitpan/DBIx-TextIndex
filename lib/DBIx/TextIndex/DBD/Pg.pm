@@ -2,7 +2,7 @@ package DBIx::TextIndex::DBD::Pg;
 
 use strict;
 
-our $VERSION = '0.24';
+our $VERSION = '0.25';
 
 use DBD::Pg;
 use base qw(DBIx::TextIndex::DBD);
