@@ -459,6 +459,18 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.13
+    Changed format for inverted list postings to compressed binary
+    format.  Index sizes should be 50% smaller than with previous versions.
+    Implemented XS code for fast coding and decoding.
+
+    Renamed 'freq_d' to 'docfreq_t'.
+
+    Bug fix: add_doc will only set bits in all_docs_vector if document
+    was actually added
+
+    UPGRADE warning, indexes will have to be rebuilt.
+
 0.12
     Added _optimize_or_search(). If query contains just OR words,
     turn the rarest words into AND words to reduce result set size

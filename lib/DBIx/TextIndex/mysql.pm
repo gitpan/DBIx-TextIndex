@@ -39,7 +39,7 @@ sub db_table_exists {
     # FIXME: $dbh->tables is marked deprecated in DBI 1.30 documentation
     my @tables = $self->{INDEX_DBH}->tables;
     for (@tables) {
-	return 1 if $table eq $_;
+	return 1 if m/^\`?$table\`?$/;
     }
     return 0;
 }
@@ -227,12 +227,12 @@ VALUES (1, ?)
 END
 }
 
-sub db_freq_d {
+sub db_docfreq_t {
     my $self = shift;
     my $table = shift;
 
     return <<END;
-select freq_d from $table
+select docfreq_t from $table
 where word = ?
 END
 
@@ -266,7 +266,7 @@ sub db_fetch_freq_and_docs_vector {
     my $table = shift;
 
     return <<END;
-select freq_d, docs_vector
+select docfreq_t, docs_vector
 from $table
 where word = ?
 END
@@ -336,7 +336,7 @@ sub db_inverted_replace {
 
     return <<END;
 replace into $table
-(word, freq_d, docs_vector, docs)
+(word, docfreq_t, docs_vector, docs)
 values (?, ?, ?, ?)
 END
 
@@ -358,7 +358,7 @@ sub db_inverted_select {
     my $table = shift;
 
     return <<END;
-select freq_d, docs_vector, docs
+select docfreq_t, docs_vector, docs
 from $table
 where word = ?
 END
@@ -412,7 +412,7 @@ sub db_create_inverted_table {
     return <<END;
 create table $table (
   word             varchar($max_word)      not null,
-  freq_d 	   int unsigned 	   not null,
+  docfreq_t 	   int unsigned 	   not null,
   docs_vector mediumblob 		   not null,
   docs	   mediumblob 		   not null,
   PRIMARY KEY 	   word_key (word)
@@ -481,7 +481,7 @@ sub db_total_words {
     my $table = shift;
 
     return <<END;
-select SUM(freq_d)
+select SUM(docfreq_t)
 from $table
 END
 

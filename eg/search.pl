@@ -8,6 +8,8 @@ use DBIx::TextIndex;
 my $DB = 'DBI:mysql:test';
 my $DBAUTH = ':';
 
+my $DEBUG = 0;
+
 my $doc_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
 my $index_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
 
@@ -15,6 +17,7 @@ my $index = DBIx::TextIndex->new({
     doc_dbh => $doc_dbh,
     index_dbh => $index_dbh,
     collection => 'encantadas',
+    print_activity => $DEBUG,
 });
 
 print "Enter a search string: ";

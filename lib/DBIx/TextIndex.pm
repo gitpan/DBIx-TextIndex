@@ -2,8 +2,14 @@ package DBIx::TextIndex;
 
 use strict;
 
+our $VERSION = '0.13';
+
+require XSLoader;
+XSLoader::load('DBIx::TextIndex', $VERSION);
+
 use Bit::Vector ();
 use Carp qw(carp croak);
+use Data::Dumper;
 use HTML::Entities ();
 use Text::Unaccent qw(unac_string);
 
@@ -29,7 +35,7 @@ my $QRY = 'DBIx::TextIndex::Exception::Query';
 
 my $ME  = 'DBIx::TextIndex"';
 
-$DBIx::TextIndex::VERSION = '0.12';
+
 
 # Version number when collection table definition last changed
 my $LAST_COLLECTION_TABLE_UPGRADE = '0.12';
@@ -164,6 +170,7 @@ sub new {
     $self->{ALL_DOCS_VECTOR_TABLE} = $self->{COLLECTION} . "_all_docs_vector";
 
     my $field_no = 0;
+
     foreach my $field ( @{$self->{DOC_FIELDS}} ) {
 	$self->{FIELD_NO}->{$field} = $field_no;
 	push @{$self->{INVERTED_TABLES}},
@@ -245,10 +252,16 @@ sub add_doc {
 
     $self->{OLD_MAX_INDEXED_ID} = $self->max_indexed_id;
     $self->max_indexed_id($sort_ids[-1]);
+
+    my @added_ids;
+
     foreach my $doc_id (@sort_ids) {
 	print $doc_id if $PA;
-	next unless $self->_ping_doc($doc_id);
-	
+	unless ($self->_ping_doc($doc_id)) {
+	    print " skipped, no doc $doc_id found\n";
+	    next;
+	}
+
 	foreach my $field_no ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	    print " field$field_no" if $PA;
 
@@ -278,11 +291,13 @@ sub add_doc {
 	    }
 	    $self->{NEW_MAXTF}->[$field_no]->[$doc_id] = $maxtf;
 	}	# end of field indexing
-
 	print "\n" if $PA;
+
+	push @added_ids, $doc_id;
+
     }	# end of doc indexing
 
-    $self->all_doc_ids(@sort_ids);
+    $self->all_doc_ids(@added_ids);
 
     $self->_commit_docs;
 
@@ -397,38 +412,27 @@ sub _inverted_remove {
 	
 	foreach my $word (keys %{$words->[$fno]}) {
             $sth_select->execute($word);
-	    my($o_freq_d, $o_docs_vector, $o_docs);
-	    $sth_select->bind_columns(\$o_freq_d, \$o_docs_vector,
+	    my($o_docfreq_t, $o_docs_vector, $o_docs);
+	    $sth_select->bind_columns(\$o_docfreq_t, \$o_docs_vector,
 				      \$o_docs);
 	    $sth_select->fetch;
 	    
 	    print "inverted_remove: field: $field: word: $word\n" if $PA;
 	    # @docs_all contains a doc id for each word that
 	    # we are removing
-	    my $freq_d = $o_freq_d - $words->[$fno]->{$word};
-	    print "inverted_remove: old freq_d: $o_freq_d\n" if $PA;
-	    print "inverted_remove: new freq_d: $freq_d\n" if $PA;
+	    my $docfreq_t = $o_docfreq_t - $words->[$fno]->{$word};
+	    print "inverted_remove: old docfreq_t: $o_docfreq_t\n" if $PA;
+	    print "inverted_remove: new docfreq_t: $docfreq_t\n" if $PA;
 	    
-	    # if new freq_d is zero, then we should remove the record
+	    # if new docfreq_t is zero, then we should remove the record
             # of this word completely
-	    if ($freq_d < 1) {
+	    if ($docfreq_t < 1) {
 		my $sql = $self->db_inverted_remove($table);
                 $self->{INDEX_DBH}->do($sql, undef, $word);
                 print qq(inverted_remove: removing "$word" completely\n)
 		    if $PA;
             	next;
             }
-
-	    # now comes the BIG PROBLEM - we cannot modify the docs
-	    # vector by shrinking it only in rows that correspond to
-	    # words found in that doc, because that would break
-	    # the matching process
-	    #
-	    # obviously we also cannot loop over all those thousands
-	    # of rows
-	    #
-	    # so we just set to zero all the bits that correspond to words
-	    # found in this doc
 
 	    my $vec = Bit::Vector->new_Enum($self->max_indexed_id + 1,
 					    $o_docs_vector);
@@ -440,17 +444,17 @@ sub _inverted_remove {
                 print "\n";
             }
 	    # now we will remove the doc from the "docs" field
-	    my %new_docs = unpack 'w*', $o_docs;
-	    foreach my $doc_id (@docs) {
-		delete $new_docs{$doc_id};
-	    }
-	    my $new_docs;
-	    while ( my($doc, $frequency) = each %new_docs) {
-		$new_docs .= pack 'ww', ( $doc, $frequency );
+	    my $term_docs = term_docs_arrayref($o_docs);
+	    my %delete_doc;
+	    @delete_doc{@docs} = (1) x @docs;
+	    my @new_term_docs;
+	    for (my $i = 0; $i < $#$term_docs ; $i += 2) {
+		next if $delete_doc{$term_docs->[$i]};
+		push @new_term_docs, ($term_docs->[$i], $term_docs->[$i + 1]);
 	    }
 
-	    $sth_replace->execute($word, $freq_d, $vec->to_Enum,
-				  $new_docs);
+	    $sth_replace->execute($word, $docfreq_t, $vec->to_Enum,
+				  pack_term_docs(\@new_term_docs));
 	}
     }
 }
@@ -491,6 +495,9 @@ sub search {
     throw $QRY( error => $ERROR{empty_query}) unless $query;
 
     my @field_nos;
+    require Data::Dumper;
+    print Data::Dumper::Dumper($self->{FIELD_NO});
+    print "\n";
     foreach my $field (keys %$query) {
 	throw $GEN( error => "invalid field ($field) in search()" )
 	    unless exists $self->{FIELD_NO}->{$field};
@@ -805,6 +812,7 @@ sub _fetch_collection_info {
     my $fetch_status = 0;
 
     my $sql = $self->db_fetch_collection_info;
+
     my $sth = $self->{INDEX_DBH}->prepare($sql);
 
     $sth->execute($self->{COLLECTION});
@@ -1049,11 +1057,11 @@ sub _fetch_vectors {
 	foreach my $word ( @{$self->{QUERY_WORDS}->[$field_no]} ) {
 	    if (not $self->{VECTOR}->[$field_no]->{$word}) {
             	# vector for this word has not been yet defined in _parse_query
-		my ($freq_d, $docs_vector) =
+		my ($docfreq_t, $docs_vector) =
 		    $self->_fetch_freq_and_docs_vector($field_no, $word);
 		$self->{VECTOR}->[$field_no]->{$word} = Bit::Vector->new_Enum(
                     $maxid, $docs_vector);
-		$self->{FREQ_D}->[$field_no]->{$word} = $freq_d;
+		$self->{DOCFREQ_T}->[$field_no]->{$word} = $docfreq_t;
 	    }
 	}
     }
@@ -1097,35 +1105,35 @@ sub _search {
     throw $QRY( error => $ERROR{'no_results'} ) if $#result_docs < 0;
 
     # Special case: only one word in query and word is not very selective,
-    # so don't bother tf-idf scoring, just return results sorted by freq_dt
+    # so don't bother tf-idf scoring, just return results sorted by docfreq_tt
     my $and_plus_or = $self->{OR_WORD_COUNT} + $self->{AND_WORD_COUNT};
     if ($and_plus_or == 1 && $#result_docs > $self->{RESULT_THRESHOLD}) {
 
 	my $field_no = $self->{QUERY_FIELD_NOS}->[0];
 	my $word = $self->{QUERY_OR_WORDS}->[$field_no]->[0];
 
-	my $freq_d = $self->_freq_d($field_no, $word);
+	my $docfreq_t = $self->_docfreq_t($field_no, $word);
 
 	# idf should use a collection size instead of max_indexed_id
 
 	my $idf;
-	if ($freq_d) {
-	    $idf = log($self->{MAX_INDEXED_ID}/$freq_d);
+	if ($docfreq_t) {
+	    $idf = log($self->{MAX_INDEXED_ID}/$docfreq_t);
 	} else {
 	    $idf = 0;
 	}
 
 	throw $QRY( error => $ERROR{'no_results'} ) if $idf < $IDF_THRESHOLD;
 
-	my %raw_score = $self->_docs($field_no, $word);
+	my $raw_score = $self->_docs($field_no, $word);
 
 	if ($self->{VALID_MASK}) {
 	    foreach my $doc_id (@result_docs) {
-		$score{$doc_id} = $raw_score{$doc_id};
+		$score{$doc_id} = $raw_score->{$doc_id};
 	    }
 	    return \%score;
 	} else {
-	    return \%raw_score;
+	    return $raw_score;
 	}
 
     }
@@ -1137,35 +1145,36 @@ sub _search {
 	foreach my $word (@{$self->{QUERY_OR_WORDS}->[$field_no]},
 			  @{$self->{QUERY_AND_WORDS}->[$field_no]} ) {
 	    
-	    my $freq_d = $self->_freq_d($field_no, $word);
-	    # next WORD unless defined $freq_d;
-	    $freq_d = 1 unless defined $freq_d;
+	    my $docfreq_t = $self->_docfreq_t($field_no, $word);
+	    # next WORD unless defined $docfreq_t;
+	    $docfreq_t = 1 unless defined $docfreq_t;
 
 	    my $idf;
-	    if ($freq_d) {
-		$idf = log($self->{MAX_INDEXED_ID}/$freq_d);
+	    if ($docfreq_t) {
+		$idf = log($self->{MAX_INDEXED_ID}/$docfreq_t);
 	    } else {
 		$idf = 0;
 	    }
 
 	    next WORD if $idf < $IDF_THRESHOLD;
 
-	    my %word_score = $self->_docs($field_no, $word);
+	    my $word_score = $self->_docs($field_no, $word);
 
 	  DOC_ID:
 
 	    foreach my $doc_id (@result_docs) {
-		# next DOC_ID unless defined $word_score{$doc_id};
-		$word_score{$doc_id} = 1 unless defined $word_score{$doc_id};
+		# next DOC_ID unless defined $word_score->{$doc_id};
+		$word_score->{$doc_id} = 1 unless
+		    defined $word_score->{$doc_id};
 		
 		my $maxtf = $self->{MAXTF}->[$field_no]->[$doc_id];
 		my $sqrt_maxtf = sqrt($maxtf);
 		$sqrt_maxtf = 1 unless $sqrt_maxtf;
 		if ($score{$doc_id}) {
 		    $score{$doc_id} *=
-			(1 + (($word_score{$doc_id}/$sqrt_maxtf) * $idf));
+			(1 + (($word_score->{$doc_id}/$sqrt_maxtf) * $idf));
 		} else {
-		    $score{$doc_id} = (1 + (($word_score{$doc_id}/$sqrt_maxtf) * $idf));
+		    $score{$doc_id} = (1 + (($word_score->{$doc_id}/$sqrt_maxtf) * $idf));
 		}
 	    }
 	}
@@ -1187,20 +1196,20 @@ sub _format_stoplisted_error {
     return qq($ERROR{no_results_stop} $stopped.);
 }
 
-sub _freq_d {
+sub _docfreq_t {
     my $self = shift;
     my $field_no = shift;
     my $word = shift;
     return undef unless $word;
-    if ($self->{FREQ_D}->[$field_no]->{$word}) {
-	return $self->{FREQ_D}->[$field_no]->{$word};
+    if ($self->{DOCFREQ_T}->[$field_no]->{$word}) {
+	return $self->{DOCFREQ_T}->[$field_no]->{$word};
     }
-    my $sql = $self->db_freq_d($self->{INVERTED_TABLES}->[$field_no]);
+    my $sql = $self->db_docfreq_t($self->{INVERTED_TABLES}->[$field_no]);
     my $sth = $self->{INDEX_DBH}->prepare($sql);
     $sth->execute($word);
-    my ($freq_d) = $sth->fetchrow_array;
-    return undef unless $freq_d;
-    return $freq_d;
+    my ($docfreq_t) = $sth->fetchrow_array;
+    return undef unless $docfreq_t;
+    return $docfreq_t;
 }
 
 ######################################################################
@@ -1231,8 +1240,8 @@ sub _optimize_or_search {
 	return if $and_word_count > 0;
 	return if $or_word_count < 1;
 
-	# sort in order of freq_d
-	my @or_words = sort { $self->{FREQ_D}->[$fno]->{$a} <=> $self->{FREQ_D}->[$fno]->{$b} } @{$self->{QUERY_OR_WORDS}->[$fno]};
+	# sort in order of docfreq_t
+	my @or_words = sort { $self->{DOCFREQ_T}->[$fno]->{$a} <=> $self->{DOCFREQ_T}->[$fno]->{$b} } @{$self->{QUERY_OR_WORDS}->[$fno]};
 	
 	my @new_and_words;
 	if ($or_word_count == 1) {
@@ -1625,14 +1634,14 @@ sub _docs {
     my $field_no = shift;
     my $word = shift;
 
-    local $^W = 0; # turn off silly uninitialized value warning
+    local $^W = 0; # turn off uninitialized value warning
     if (@_) {
-	my ($id, $frequency) = @_;
-	$self->{DOCS}->[$field_no]->{$word} .=
-	    pack 'ww', ($id, $frequency);
-	$self->{FREQ_D}->[$field_no]->{$word}++; 
+	my @doc_and_freq = @_;
+	$self->{TERM_DOCS_VINT}->[$field_no]->{$word} .=
+	    pack_vint(\@doc_and_freq), 
+	$self->{DOCFREQ_T}->[$field_no]->{$word}++; 
     } else {
-	unpack 'w*', $self->_fetch_docs($field_no, $word);
+	term_docs_hashref($self->_fetch_docs($field_no, $word));
     }
 
 }
@@ -1711,10 +1720,10 @@ sub _commit_docs {
 	my $sql = $self->db_inverted_replace($self->{INVERTED_TABLES}->[$field_no]);
 	my $i_sth = $self->{INDEX_DBH}->prepare($sql);
 
-	print("field$field_no ", scalar keys %{$self->{DOCS}->[$field_no]},
+	print("field$field_no ", scalar keys %{$self->{TERM_DOCS_VINT}->[$field_no]},
 	       " distinct words\n") if $PA;
 
-	while (my ($word, $docs) = each %{$self->{DOCS}->[$field_no]}) {
+	while (my ($word, $term_docs_vbyte) = each %{$self->{TERM_DOCS_VINT}->[$field_no]}) {
 	    print "$word\n" if $PA >= 2;
 
 	    my $sql = $self->db_inverted_select($self->{INVERTED_TABLES}->[$field_no]);
@@ -1722,34 +1731,42 @@ sub _commit_docs {
 
 	    $s_sth->execute($word);
 
-	    my $o_freq_d = 0;
+	    my $o_docfreq_t = 0;
 	    my $o_docs_vector = '';
-	    my $o_docs = '';
+	    my $o_term_docs = '';
 
-	    $s_sth->bind_columns(\$o_freq_d, \$o_docs_vector,
-	    	\$o_docs);
+	    $s_sth->bind_columns(\$o_docfreq_t, \$o_docs_vector,
+	    	\$o_term_docs);
 
 	    $s_sth->fetch;
 	    $s_sth->finish;
 
-	    my %frequencies = unpack 'w*', $docs;
+	    my @term_docs = unpack 'w*', $term_docs_vbyte;
+
+	    my %term_docs_hash = @term_docs;
+
+	    my @doc_ids = sort { $a <=> $b } keys %term_docs_hash;
 
 	    my $o_vector = Bit::Vector->new_Enum(($self->{MAX_INDEXED_ID} + 1),
-	    	$o_docs_vector);
-		my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
-		$vector->Index_List_Store(keys %frequencies);
-		$vector->Union($o_vector, $vector);
+						 $o_docs_vector);
+	    my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
+	    $vector->Index_List_Store(@doc_ids);
+	    $vector->Union($o_vector, $vector);
+
+	    # unpack $o_term_docs into arrayref
+	    my $old_term_docs = term_docs_arrayref($o_term_docs);
 
 	    local $^W = 0;
 	    $i_sth->execute($word,
-			    ($self->{FREQ_D}->[$field_no]->{$word} + $o_freq_d),
+			    ($self->{DOCFREQ_T}->[$field_no]->{$word} + $o_docfreq_t),
 			    $vector->to_Enum,
-			    ($o_docs . $docs)) or warn $self->{INDEX_DBH}->err;
+			    pack_term_docs( [ @$old_term_docs, @term_docs] )
+			    ) or warn $self->{INDEX_DBH}->err;
 
 	}
 	# Flush temporary hashes after data is stored
-	$self->{DOCS}->[$field_no] = ();
-	$self->{FREQ_D}->[$field_no] = ();
+	delete($self->{TERM_DOCS_VINT}->[$field_no]);
+	delete($self->{DOCFREQ_T}->[$field_no]);
 
 	$i_sth->finish;
 

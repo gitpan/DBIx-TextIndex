@@ -1,8 +1,11 @@
 Changes
 MANIFEST
 Makefile.PL
+ppport.h
 README
+TextIndex.xs
 eg/README
+eg/delete_index.pl
 eg/index.pl
 eg/load_sample.pl
 eg/search.cgi
@@ -20,4 +23,5 @@ t/03_load_docs.t
 t/04_index_db_table.t
 t/05_search.t
 t/06_remove_docs.t
+t/07_delete_index.t
 testdata/encantadas.txt

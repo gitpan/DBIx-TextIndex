@@ -11,7 +11,8 @@ BEGIN {
 
 
 $ENV{DBI_DSN} = $ENV{DBI_DSN} || "DBI:mysql:database=test";
-my $dbh = DBI->connect();
+my $dsn = $ENV{DBI_DSN};
+my $dbh = DBI->connect($dsn, undef, undef, { RaiseError => 1, PrintError => 0, AutoCommit => 0, ShowErrorStatement => 1 });
 
 ok( $dbh && $dbh->ping );
 

@@ -9,7 +9,8 @@ BEGIN {
 
 
 $ENV{DBI_DSN} = $ENV{DBI_DSN} || "DBI:mysql:database=test";
-my $dbh = DBI->connect();
+my $dsn = $ENV{DBI_DSN};
+my $dbh = DBI->connect($dsn, undef, undef, { RaiseError => 1, PrintError => 0, AutoCommit => 0, ShowErrorStatement => 1 });
 
 ok( $dbh && $dbh->ping );
 
@@ -48,7 +49,7 @@ foreach my $term (@terms) {
 	if (ref $@ && $@->isa('DBIx::TextIndex::Exception::Query') ) {
 	    $top_doc = 0;
 	} else {
-	    die $@;
+	    die $@ . "\n\n" . $@->trace;
 	}
     } else {
 	my @results;
