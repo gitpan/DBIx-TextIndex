@@ -2,6 +2,12 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.11
+
+    Bug fix: HTML tags are now changed to a single space, instead of
+    empty string when indexing document. Prevents concatenation of words
+    in some cases.
+
 0.10
 
     Fixed collection table upgrade bug

@@ -8,7 +8,7 @@ use HTML::Entities ();
 
 my $ME = "DBIx::TextIndex";
 
-$DBIx::TextIndex::VERSION = '0.10';
+$DBIx::TextIndex::VERSION = '0.11';
 
 # Version number when collection table definition last changed
 my $LAST_COLLECTION_TABLE_UPGRADE = '0.10';
@@ -1625,7 +1625,7 @@ sub _words {
     my $document = shift;
 
     # kill tags
-    $document =~ s/<.*?>//g;
+    $document =~ s/<.*?>/ /g;
 
     # Decode HTML entities
     if ($self->{DECODE_HTML_ENTITIES}) {
