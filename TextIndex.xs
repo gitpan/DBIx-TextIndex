@@ -4,11 +4,13 @@
 
 #include "ppport.h"
 
-#define TEXTINDEX_DEREF_AV(ref,av) ( ref && SvROK(ref) && \
+#define POS_ARRAY_SIZE 1000
+
+#define TEXTINDEX_DEREF_AV(ref, av) ( ref && SvROK(ref) && \
              (av = (AV*)SvRV(ref)) && \
              SvTYPE(av) == SVt_PVAV )
 
-#define TEXTINDEX_DEREF_HV(ref,hv) ( ref && SvROK(ref) && \
+#define TEXTINDEX_DEREF_HV(ref, hv) ( ref && SvROK(ref) && \
              (hv = (HV*)SvRV(ref)) && \
              SvTYPE(hv) == SVt_PVHV ) 
 
@@ -29,6 +31,7 @@ static unsigned int *BITMASKS;
 
 void bitvec_boot(void);
 unsigned int get_doc_freq_pair(char *, unsigned int, unsigned int, unsigned int *, unsigned int *g);
+unsigned int get_tp_vint(char *, unsigned int, unsigned int *);
 int bitvec_test_bit(unsigned int *, unsigned int);
 
 int bitvec_test_bit(unsigned int *addr, unsigned int index) {
@@ -79,6 +82,60 @@ unsigned int get_doc_freq_pair(char *string, unsigned int pos, unsigned int last
     }
     return pos;
 }
+
+
+unsigned int get_tp_vint(char *tp, unsigned int tp_pos, unsigned int *cur_tp_delta) {
+    unsigned int value = 0;
+    char temp;
+
+    value = *(tp + tp_pos); tp_pos++;
+    if (value & 0x80)
+    {
+        value &= 0x7f;
+        do
+        {
+	        temp = *(tp + tp_pos); tp_pos++;
+	        value = (value << 7) + (temp & 0x7f);
+	} while (temp & 0x80);
+    }
+    *cur_tp_delta = value;
+    return tp_pos;
+}
+
+
+/*
+unpack_vint_delta(wordptr addr, charptr buffer, N_int length)
+{
+    ErrCode error = ErrCode_Ok;
+    N_word  bits = bits_(addr);
+    N_word  offset;
+    N_word  index;
+    N_word  last_index = 0;
+    N_word  temp;
+
+    if (bits > 0)
+    {
+        BitVector_Empty(addr);
+	while ((not error) && (length > 0)) {
+	    offset = (N_word) *buffer++; length--;
+	    if (offset AND 0x0080)
+            {
+	        offset &= 0x007F;
+		do
+		{
+		    temp = (N_word) *buffer++; length--;
+		    offset = (offset << 7) + (temp & 0x007F);
+		} while (temp AND 0x0080);
+	    }
+	    index = last_index + offset;
+	    if (index >= bits) error = ErrCode_Indx;
+	    BIT_VECTOR_SET_BIT(addr,index);
+	    last_index = index;
+	}
+    }
+    return(error);
+}
+*/
 
 MODULE = DBIx::TextIndex		PACKAGE = DBIx::TextIndex
 
@@ -375,6 +432,48 @@ PPCODE:
 
 
 void
+pack_vint_delta(ints_arrayref)
+  SV *ints_arrayref
+PPCODE:
+{
+    char *packed;
+    AV *ints_array;
+    I32 length = 0;
+    unsigned int i, j, value, last_value, delta_value;
+    register unsigned long buff;
+    if (! TEXTINDEX_DEREF_AV(ints_arrayref, ints_array )) {
+        TEXTINDEX_ERROR("args must be arrayref");
+    }
+    length = av_len(ints_array);
+    if (length < 0)
+        XSRETURN_UNDEF;
+    New(1,  packed, (4 * (length + 1)), char);
+    j = 0;
+    last_value = 0;
+    for (i = 0 ; i <= length ; i++) {
+        value = SvIV(*av_fetch(ints_array, i, 0));
+	delta_value = value - last_value;
+	last_value = value;
+
+ 	buff = delta_value & 0x7f;
+	while ((delta_value >>= 7)) {
+	    buff <<= 8;
+            buff |= ((delta_value & 0x7f) | 0x80);
+        }
+        while (1) {
+            *(packed + j) = buff;
+            j++;
+            if (buff & 0x80)
+                buff >>= 8;
+            else
+                break;
+        }
+    }
+    XPUSHs(sv_2mortal(newSVpv(packed, j)));
+    Safefree(packed);
+}
+
+void
 pack_term_docs(term_docs_arrayref)
   SV *term_docs_arrayref
 PPCODE:
@@ -574,6 +673,180 @@ PPCODE:
 }
 
 void
+pos_search(and_vec_ref, term_docs_arrayref, term_pos_arrayref, prox_SV, \
+	   and_vec_min_SV, and_vec_max_SV)
+  SV *and_vec_ref
+  SV *term_docs_arrayref
+  SV *term_pos_arrayref
+  SV *prox_SV
+  SV *and_vec_min_SV
+  SV *and_vec_max_SV
+PPCODE:
+{
+    I32 *length_td,
+        *length_tp;
+    unsigned int term_count,
+                 prox        = SvIV(prox_SV),
+	         and_vec_min = SvIV(and_vec_min_SV),
+		 and_vec_max = SvIV(and_vec_max_SV),
+		 doc,
+		 doc_n,
+		 *last_doc,
+		 freq,
+                 freq_n,
+		 *freqs,
+		 *td_pos,
+		 **positions,
+		 *tp_idx,
+		 *tp_pos,
+                 cur_tp_delta,
+		 cur_tp_delta_n,
+                 *cur_tp_idx,
+		 seq_count,
+		 last_pos,
+		 next_pos,
+		 a,
+                 i,
+		 j,
+		 k;
+    unsigned int *and_vec;
+    SV *and_vec_obj;
+    AV *term_docs;
+    AV *term_pos;
+    AV *results;
+    char **tp;
+    char **td;
+    STRLEN len;
+
+    if (! TEXTINDEX_DEREF_BITVEC(and_vec_ref, and_vec_obj, and_vec)) {
+        TEXTINDEX_ERROR("arg1 must be Bit::Vector object");
+    }
+    if (! TEXTINDEX_DEREF_AV(term_docs_arrayref, term_docs)) {
+        TEXTINDEX_ERROR("arg2 must be arrayref");
+    }
+    if (! TEXTINDEX_DEREF_AV(term_pos_arrayref, term_pos)) {
+        TEXTINDEX_ERROR("arg3 must be arrayref");
+    }
+
+    results = newAV();
+
+    if (prox < 1) prox = 1;
+
+    term_count = av_len(term_docs) + 1;
+
+    if (term_count <= 0)
+        XSRETURN_UNDEF;
+
+    /* Allocate memory for arrays */
+    New(1, td, term_count, char *);
+    New(2, length_td, term_count, I32);
+    New(3, tp, term_count, char *);
+    New(4, length_tp, term_count, I32);
+    New(5, td_pos, term_count, int);
+    New(6, last_doc, term_count, int);
+    New(7, tp_idx, term_count, int);
+    New(8, cur_tp_idx, term_count, int);
+    New(9, tp_pos, term_count, int);
+    New(10, freqs, term_count, int);
+    New(11, positions, term_count, unsigned int *);
+
+    /* Initialize arrays */
+    for (j = 0; j <= term_count - 1; j++) {
+	td[j] = SvPV(*av_fetch(term_docs, j, 0), len);
+	length_td[j] = len;
+	tp[j] = SvPV(*av_fetch(term_pos, j, 0), len);
+	length_tp[j] = len;
+	td_pos[j] = 0;
+        last_doc[j] = 0;
+	tp_idx[j] = 0;
+	cur_tp_idx[j] = 0;
+	tp_pos[j] = 0;
+	New((12 + j), positions[j], POS_ARRAY_SIZE, int);
+    }
+
+    while (td_pos[0] = \
+	   get_doc_freq_pair(td[0], td_pos[0], last_doc[0], &doc, &freq))
+    {
+	last_doc[0] = doc;
+	tp_idx[0] += freq;
+	if (td_pos[0] > length_td[0]) break;
+	if (doc > and_vec_max) break;
+        if (doc < and_vec_min) continue;
+        if ( ! bitvec_test_bit(and_vec, doc) ) continue;
+	if (freq > POS_ARRAY_SIZE) Renew(positions[0], freq, int);
+        a = 0;
+        while (tp_pos[0] = get_tp_vint(tp[0], tp_pos[0], &cur_tp_delta)) {
+	    cur_tp_idx[0]++;
+	    if (cur_tp_idx[0] < tp_idx[0] - freq + 1) continue;
+            positions[0][a] = cur_tp_delta;
+	    a++;
+	    if (cur_tp_idx[0] + 1 > tp_idx[0]) break;
+	    if (tp_pos[0] > length_tp[0]) break;
+	}
+        for (a = 1; a < freq; a++) {
+            positions[0][a] = positions[0][a] + positions[0][a-1];
+	}
+	for (j = 1; j <= term_count - 1; j++) {
+	    while (td_pos[j] = get_doc_freq_pair(td[j], td_pos[j], \
+				    last_doc[j], &doc_n, &freq_n))
+	    {
+		last_doc[j] = doc_n;
+		tp_idx[j] += freq_n;
+		if (doc_n >= doc || td_pos[j] > length_td[j]) break;
+	    }
+	    a = 0;
+	    while (tp_pos[j] = get_tp_vint(tp[j], tp_pos[j], &cur_tp_delta_n))
+	    {
+		cur_tp_idx[j]++;
+		if (cur_tp_idx[j] < tp_idx[j] - freq_n + 1) continue;
+		positions[j][a] = cur_tp_delta_n;
+		a++;
+		if (cur_tp_idx[j] + 1 > tp_idx[j]) break;
+		if (tp_pos[j] > length_tp[j]) break;
+	    }
+	    freqs[j] = freq_n;
+	    for (a = 1; a < freq_n; a++) {
+		positions[j][a] = positions[j][a] + positions[j][a-1];
+	    }
+	}
+	/* Loop through the accumulated position arrays */
+	for (a = 0; a < freq; a++) {
+	    seq_count = 1;
+	    last_pos = positions[0][a];
+	    for (j = 1; j <= term_count - 1; j++) {
+		for (k = 0; k < freqs[j]; k++) {
+		    next_pos = positions[j][k];
+		    if (next_pos > last_pos && next_pos <= last_pos + prox) {
+			seq_count++;
+			last_pos = next_pos;
+		    } /* FIXME: we can break out early by testing for skipped positions */
+		}
+	    }
+	    if (seq_count == term_count) {
+		av_push(results, newSViv(doc));
+		break;
+	    }
+	}
+    }
+    Safefree(td);
+    Safefree(length_td);
+    Safefree(tp);
+    Safefree(length_tp);
+    Safefree(td_pos);
+    Safefree(last_doc);
+    Safefree(tp_idx);
+    Safefree(cur_tp_idx);
+    Safefree(tp_pos);
+    Safefree(freqs);
+    for (j = 0; j <= term_count - 1; j++) {
+	Safefree(positions[j]);
+    }
+    Safefree(positions);
+    XPUSHs(sv_2mortal(newRV_noinc((SV *)results)));
+}
+
+
+void
 score_term_docs_okapi(term_docs, score_hashref, bitvec_ref, acc_lim_SV, \
                       res_min_SV, res_max_SV, idf_SV, f_t_SV, W_D_arrayref, \
                       avg_W_d_SV, w_qt_SV, k1_SV, b_SV)
@@ -596,7 +869,7 @@ PPCODE:
                  length;
     unsigned int acc_lim    =  SvIV(acc_lim_SV),
                  f_t        =  SvIV(f_t_SV),
-                 res_min    =  SvIV(res_min_SV), 
+                 res_min    =  SvIV(res_min_SV),
                  res_max    =  SvIV(res_max_SV),
                  doc,
                  last_doc,
@@ -647,7 +920,7 @@ PPCODE:
         W_d = SvNV(*av_fetch(W_D, doc, 0));
         TF = (((k1 + 1) * f_dt) / (k1 * ((1 - b)+((b * W_d)/avg_W_d)) + f_dt));
         doc_score = idf * TF * w_qt;
-        doc_id = newSViv(doc);  
+        doc_id = newSViv(doc);
         score_he = hv_fetch_ent(score, doc_id, TRUE, 0);
         if (old_score = SvIV(HeVAL(score_he)))
             doc_score += old_score;

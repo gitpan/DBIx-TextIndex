@@ -1,29 +1,40 @@
-use Test::More tests => 7;
-
 use strict;
 
-our $TESTDATA = 'testdata/encantadas.txt';
+use Test::More;
+use DBI;
+use DBIx::TextIndex;
 
-BEGIN { 
-    use_ok('DBI');
-    use_ok('DBIx::TextIndex');
-};
+my $TESTDATA = 'testdata/encantadas.txt';
 
+if (defined $ENV{DBI_DSN}) {
+    plan tests => 5;
+} else {
+    plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
+}
 
-$ENV{DBI_DSN} = $ENV{DBI_DSN} || "DBI:mysql:database=test";
-my $dbh = DBI->connect();
+my $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 0 });
 
-ok( $dbh && $dbh->ping );
+ok( defined $dbh && $dbh->ping );
 
-# FIXME: make this database-neutral
-ok( defined($dbh->do('DROP TABLE IF EXISTS textindex_doc')) );
+my $dbd = $dbh->{Driver}->{Name};
 
-ok( defined($dbh->do(<<END) ) );
+if ($dbd eq 'mysql') {
+    ok( defined($dbh->do('DROP TABLE IF EXISTS textindex_doc')) );
+    ok( defined($dbh->do(<<END) ) );
 CREATE TABLE textindex_doc(
 doc_id INT UNSIGNED NOT NULL,
 doc TEXT,
 PRIMARY KEY (doc_id))
 END
+} else {
+    ok( defined($dbh->do('DROP TABLE textindex_doc')) );
+    ok( defined($dbh->do(<<END) ) );
+CREATE TABLE textindex_doc(
+doc_id INT NOT NULL PRIMARY KEY,
+doc TEXT)
+END
+}
+
 
 {
     local $/ ="\n\n";

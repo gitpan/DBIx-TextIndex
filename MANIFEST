@@ -16,9 +16,10 @@ lib/DBIx/TextIndex.pm
 lib/DBIx/TextIndex/Exception.pm
 lib/DBIx/TextIndex/QueryParser.pm
 lib/DBIx/TextIndex/TermDocsCache.pm
-lib/DBIx/TextIndex/mysql.pm
 lib/DBIx/TextIndex/stop-en.pm
 lib/DBIx/TextIndex/stop-cz.pm
+lib/DBIx/TextIndex/DBD/Pg.pm
+lib/DBIx/TextIndex/DBD/mysql.pm
 t/00_load.t
 t/01_version.t
 t/02_connect_db.t
@@ -28,3 +29,4 @@ t/05_search.t
 t/06_remove_docs.t
 t/07_delete_index.t
 testdata/encantadas.txt
+META.yml                                 Module meta-data (added by MakeMaker)

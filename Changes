@@ -2,6 +2,19 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.22
+
+    WARNING: indexes must be recreated from scratch.
+    Rewrote proximity index code from scratch using XS. New index format
+    is faster, more compact, and scaleable. Flag proximity_index
+    now defaults to 1.
+
+    Removed legacy_tf_idf scoring method.
+
+    Fixed division-by-zero error with wildcard searches
+
+    Added support for PostgreSQL
+
 0.21
     Fixed bug where proximity search was case-sensitive instead of
     case-insensitive
@@ -246,7 +259,7 @@ Revision history for Perl extension DBIx::TextIndex.
     compatibility with old code
 	
     - I put a new 'html_search.cgi' script to examples/ to show how the new
-    highligting and context previewing works.
+    highlighting and context previewing works.
 	  
     - the HTML::Highlight module can be found on CPAN - 
     http://www.cpan.org/authors/id/T/TR/TRIPIE/
@@ -256,6 +269,8 @@ Revision history for Perl extension DBIx::TextIndex.
 	  
   tripie v1 changes:
 
+    NOTE: tripie proximity index is replaced with newer compact index
+    structure as of version 0.22
     added proximity indexing
       - based on positions of words in a document
       - by default it is disabled, activate it by new option "proximity_index"

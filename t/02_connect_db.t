@@ -1,13 +1,26 @@
-use Test::More tests => 3;
+use Test::More;
+use DBI;
+use DBIx::TextIndex;
 
 use strict;
 
-BEGIN { 
-    use_ok('DBI');
-    use_ok('DBIx::TextIndex');
+if (defined $ENV{DBI_DSN}) {
+    plan tests => 1;
+} else {
+    plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
+}
+
+my $dbh;
+eval {
+    $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 0 });
 };
+if ($@) {
+    if (! $DBI::errstr) {
+	print "Bail out! Could not connect to database: $@\n";
+    } else {
+	print "Bail out! Could not connect to database: $DBI::errstr\n";
+    }
+    exit;
+}
 
-$ENV{DBI_DSN} = $ENV{DBI_DSN} || "DBI:mysql:database=test";
-my $dbh = DBI->connect();
-
-ok($dbh && $dbh->ping);
+ok( defined $dbh && $dbh->ping);

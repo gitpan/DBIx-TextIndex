@@ -2,7 +2,7 @@ package DBIx::TextIndex::TermDocsCache;
 
 use strict;
 
-our $VERSION = '0.18.90';
+our $VERSION = '0.22';
 
 use Bit::Vector;
 #use DBIx::TextIndex;
@@ -12,8 +12,8 @@ sub new {
     my $class = ref($pkg) || $pkg;
     my $self = bless {}, $class;
     $self->_init(shift);
-    my $db = 'DBIx/TextIndex/' . $self->{DB} . '.pm';
-    do $db;
+    my $dbd = 'DBIx/TextIndex/DBD/' . $self->{DBD} . '.pm';
+    do $dbd;
 
     return $self;
 }
@@ -52,6 +52,13 @@ sub flush_term_docs {
     delete($self->{DOCFREQ_T});
 }
 
+sub term_pos {
+    my $self = shift;
+    my ($fno, $term) = @_;
+    $self->_fetch_term_pos($fno, $term) unless exists $self->{TERM_POS}->[$fno]->{$term};
+    return $self->{TERM_POS}->[$fno]->{$term};
+}
+
 sub term_docs {
     my $self = shift;
     my ($fno, $term) = @_;
@@ -75,6 +82,7 @@ sub term_docs_arrayref {
 }
 
 sub term_doc_ids_arrayref {
+    no warnings qw(uninitialized);
     my $self = shift;
     my ($fno, $term) = @_;
     $self->_fetch_term_docs($fno, $term) unless exists $self->{TERM_DOCS}->[$fno]->{$term};
@@ -107,6 +115,16 @@ sub docfreq_t {
     my ($fno, $term) = @_;
     $self->_fetch_term_docs($fno, $term) unless exists $self->{DOCFREQ_T}->[$fno]->{$term};
     return $self->{DOCFREQ_T}->[$fno]->{$term};
+}
+
+sub _fetch_term_pos {
+    my $self = shift;
+    my ($fno, $term) = @_;
+    my $sql =
+	$self->db_fetch_term_pos($self->{INVERTED_TABLES}->[$fno]);
+
+    ($self->{TERM_POS}->[$fno]->{$term})
+	= $self->{DBH}->selectrow_array($sql, undef, $term);
 }
 
 sub _fetch_term_docs {

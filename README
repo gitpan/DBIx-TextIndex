@@ -12,8 +12,7 @@ SYNOPSIS
          doc_id_field => 'primary_key',
          index_dbh => $index_dbh,
          collection => 'collection_1',
-         db => 'mysql',
-         proximity_index => 0,
+         proximity_index => 1,
          errors => {
              empty_query => "your query was empty",
              quote_count => "phrases must be quoted correctly",
@@ -98,11 +97,8 @@ DESCRIPTION
         or underscores [A-Za-z0-9_]
 
     proximity_index
-        Activates a proximity index for faster phrase searches and word
-        proximity based matching. Disabled by default. Only efficient for
-        bigger documents. Takes up a lot of space and slows down the
-        indexing process. Proximity based matching is activated by a query
-        containing a phrase in form of:
+        Newer compressed proximity index is turned on by default as of
+        version 0.22.
 
                 "some phrase"~2 => matches "some nice phrase"
                 "some phrase"~1 => matches only exact "some phrase"
@@ -114,13 +110,10 @@ DESCRIPTION
 
                 "some phrase"~3 does not match "phrase nice some" or "phrase some"
 
-    db  SQL used in this module is database specific in some aspects. In
-        order to use this module with a variety of databases, so called
-        "database module" can be specified. Default is the mysql module.
-        Another modules have yet to be written.
-
-        Names of the database modules correspond to the names of DBI drivers
-        and are case sensitive.
+    db  In past versions, the database driver name was passed in this
+        argument. As of version 0.22, the driver name is read from the
+        database handle passed to index_dbh. Both MySQL (DBD::mysql) and
+        PostgreSQL (DBD::Pg) are supported.
 
     errors
         This hash reference can be used to override default error messages.
@@ -198,18 +191,6 @@ DESCRIPTION
     It's actually not possible to completely recover the space taken by the
     documents that are removed, therefore it's recommended to rebuild the
     index when you remove a significant amount of documents.
-
-    All space reserved in the proximity index is recovered. Approx. 75% of
-    space reserved in the inverted tables and max term frequency table is
-    recovered.
-
-  $index->disable_doc(\@doc_ids)
-    This method can be used to disable documents. Disabled documents are not
-    included in search results. This method should be used to "remove"
-    documents from the index. Disabled documents are not actually removed
-    from the index, therefore its size will remain the same. It's
-    recommended to rebuild the index when you disable a significant amount
-    of documents.
 
   $index->search(\%search_args)
     search() returns $results, a hash reference. The keys of the hash are
@@ -410,12 +391,11 @@ CZECH LANGUAGE SUPPORT
         Requires the module "CzFast" that is available on CPAN in directory
         of author "TRIPIE".
 
-AUTHORS
-        Daniel Koch, dkoch@bizjournals.com. Contributions by Tomas Styblo,
-        tripie@cpan.org.
+AUTHOR
+        Daniel Koch, dkoch@bizjournals.com.
 
 COPYRIGHT
-        Copyright 1997-2003 by Daniel Koch. All rights reserved.
+        Copyright 1997-2004 by Daniel Koch. All rights reserved.
 
 LICENSE
         This package is free software; you can redistribute it and/or modify
@@ -430,15 +410,17 @@ DISCLAIMER
         See the "GNU General Public License" for more details.
 
 ACKNOWLEDGEMENTS
+        Thanks to Jim Blomo, for PostgreSQL patches.
+
         Thanks to the lucy project (http://www.seg.rmit.edu.au/lucy/) for
         ideas and code for the Okapi scoring function.
 
         Simon Cozens' Lucene::QueryParser module was adapted to create the
         DBIx::TextIndex QueryParser module.
 
-        Special thanks to Tomas Styblo, for proximity index support, Czech
-        language support, stoplists, highlighting, document removal and many
-        other improvements.
+        Special thanks to Tomas Styblo, for first version of proximity
+        index, Czech language support, stoplists, highlighting, document
+        removal and many other improvements.
 
         Thanks to Ulrich Pfeifer for ideas and code from Man::Index module
         in "Information Retrieval, and What pack 'w' Is For" article from
@@ -451,8 +433,6 @@ ACKNOWLEDGEMENTS
 BUGS
         Documentation is not complete.
 
-        Phrase indexing is not scalable.
-
         Please feel free to email me (dkoch@bizjournals.com) with any
         questions or suggestions.
 
@@ -462,6 +442,19 @@ SEE ALSO
 Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
+
+0.22
+
+    WARNING: indexes must be recreated from scratch.
+    Rewrote proximity index code from scratch using XS. New index format
+    is faster, more compact, and scaleable. Flag proximity_index
+    now defaults to 1.
+
+    Removed legacy_tf_idf scoring method.
+
+    Fixed division-by-zero error with wildcard searches
+
+    Added support for PostgreSQL
 
 0.21
     Fixed bug where proximity search was case-sensitive instead of
@@ -707,7 +700,7 @@ Revision history for Perl extension DBIx::TextIndex.
     compatibility with old code
 	
     - I put a new 'html_search.cgi' script to examples/ to show how the new
-    highligting and context previewing works.
+    highlighting and context previewing works.
 	  
     - the HTML::Highlight module can be found on CPAN - 
     http://www.cpan.org/authors/id/T/TR/TRIPIE/
@@ -717,6 +710,8 @@ Revision history for Perl extension DBIx::TextIndex.
 	  
   tripie v1 changes:
 
+    NOTE: tripie proximity index is replaced with newer compact index
+    structure as of version 0.22
     added proximity indexing
       - based on positions of words in a document
       - by default it is disabled, activate it by new option "proximity_index"

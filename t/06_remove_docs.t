@@ -1,20 +1,18 @@
-use Test::More tests => 6;
-
 use strict;
 
-our $TESTDATA = 'testdata/encantadas.txt';
+use Test::More;
+use DBI;
+use DBIx::TextIndex;
 
-BEGIN { 
-    use_ok('DBI');
-    use_ok('DBIx::TextIndex');
-};
+if (defined $ENV{DBI_DSN}) {
+    plan tests => 4;
+} else {
+    plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
+}
 
+my $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 0 });
 
-$ENV{DBI_DSN} = $ENV{DBI_DSN} || "DBI:mysql:database=test";
-my $dsn = $ENV{DBI_DSN};
-my $dbh = DBI->connect($dsn, undef, undef, { RaiseError => 1, PrintError => 0, AutoCommit => 0, ShowErrorStatement => 1 });
-
-ok( $dbh && $dbh->ping );
+ok( defined $dbh && $dbh->ping );
 
 my ($max_doc_id) = $dbh->selectrow_array(qq(SELECT MAX(doc_id) FROM textindex_doc));
 
@@ -32,7 +30,7 @@ $index->remove_doc(2,3,76,105);
 
 my $results;
 
-my @top_docs  = (98, 0, 0, 0, 98, 0, 0);
+my @top_docs  = (154, 0, 0, 0, 154, 0, 0);
 
 my @terms = ('isle',
 	     'greedy',
@@ -47,8 +45,7 @@ my @result_docs;
 foreach my $term (@terms) {
     my $top_doc;
     eval {
-	$results = $index->search({ doc => $term },
-                                  { scoring_method => 'legacy_tfidf' });
+	$results = $index->search({ doc => $term });
     };
     if ($@) {
 	if (ref $@ && $@->isa('DBIx::TextIndex::Exception::Query') ) {

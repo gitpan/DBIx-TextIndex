@@ -1,19 +1,18 @@
-use Test::More tests => 11;
-
 use strict;
 
-our $TESTDATA = 'testdata/encantadas.txt';
+use Test::More;
+use DBI;
+use DBIx::TextIndex;
 
-BEGIN { 
-    use_ok('DBI');
-    use_ok('DBIx::TextIndex');
-};
+if (defined $ENV{DBI_DSN}) {
+    plan tests => 9;
+} else {
+    plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
+}
 
+my $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 0 });
 
-$ENV{DBI_DSN} = $ENV{DBI_DSN} || "DBI:mysql:database=test";
-my $dbh = DBI->connect();
-
-ok( $dbh && $dbh->ping );
+ok( defined $dbh && $dbh->ping );
 
 my ($max_doc_id) = $dbh->selectrow_array(qq(SELECT MAX(doc_id) FROM textindex_doc));
 

@@ -2,7 +2,7 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.21';
+our $VERSION = '0.22';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -13,7 +13,12 @@ use DBIx::TextIndex::Exception;
 use DBIx::TextIndex::QueryParser;
 use DBIx::TextIndex::TermDocsCache;
 use HTML::Entities ();
-use Text::Unaccent qw(unac_string);
+my $unac;
+BEGIN {
+    eval { require Text::Unaccent; import Text::Unaccent qw(unac_string) };
+    $unac = $@ ? 0 : 1;
+}
+use constant DO_UNAC => $unac;
 
 my $GEN = 'DBIx::TextIndex::Exception::General';
 my $DA  = 'DBIx::TextIndex::Exception::DataAccess';
@@ -30,8 +35,7 @@ my $MAX_WORD_LENGTH = 20;
 # Minimum size of word base before a wildcard
 my $MIN_WILDCARD_LENGTH = 3;
 
-# Used to screen stop words from the scoring process
-my $IDF_MIN_LEGACY_TFIDF = 0.2;
+ # Used to screen stop words from the scoring process
 my $IDF_MIN_OKAPI        = -1.8;
 
 # What can be considered too many results
@@ -58,8 +62,6 @@ my %ERROR = (
 my $COLLECTION_TABLE = 'collection';
 
 my @MASK_TYPE = qw(and_mask or_mask not_mask);
-
-my $DB_DEFAULT = 'mysql';
 
 my $CHARSET_DEFAULT = 'iso-8859-1';
 
@@ -95,7 +97,7 @@ my %COLLECTION_FIELD_DEFAULT = (
     doc_fields => '',
     charset => $CHARSET_DEFAULT,
     stoplist => '',
-    proximity_index => '0',
+    proximity_index => '1',
     error_quote_count => $ERROR{quote_count},
     error_empty_query => $ERROR{empty_query},
     error_no_results => $ERROR{no_results},
@@ -137,12 +139,14 @@ sub new {
     $self->{INDEX_DBH}->{ChopBlanks} = 0;
 
     $self->{PRINT_ACTIVITY} = 0;
-    $self->{PRINT_ACTIVITY} = $args->{'print_activity'};
+    $self->{PRINT_ACTIVITY} = $args->{'print_activity'} || 0;
     $PA = $self->{PRINT_ACTIVITY};
 
-    $args->{db} = $args->{db} ? $args->{db} : $DB_DEFAULT;
-    my $db = 'DBIx/TextIndex/' . $args->{db} . '.pm';
-    require "$db";
+    $args->{dbd} = $self->{INDEX_DBH}->{Driver}->{Name};
+    my $dbd = 'DBIx/TextIndex/DBD/' . $args->{dbd} . '.pm';
+    require "$dbd";
+
+    $self->{DBD} = $args->{dbd};
 
     unless ($self->_fetch_collection_info) {
 	$self->{DOC_TABLE} = $args->{doc_table};
@@ -150,7 +154,9 @@ sub new {
 	$self->{DOC_ID_FIELD} = $args->{doc_id_field};
 	$self->{CHARSET} = $args->{charset} || $CHARSET_DEFAULT;
     	$self->{STOPLIST} = $args->{stoplist};
-    	$self->{PINDEX} = $args->{proximity_index} || 0;
+    	$self->{PROXIMITY_INDEX} = defined $args->{proximity_index} ?
+	    $args->{proximity_index} :
+	    $COLLECTION_FIELD_DEFAULT{proximity_index};
 	# overiding default error messages
 	while (my($error, $msg) = each %{$args->{errors}}) {
 	    $ERROR{$error} = $msg;
@@ -173,7 +179,6 @@ sub new {
 	    $COLLECTION_FIELD_DEFAULT{update_commit_interval};
     }
     $self->{CZECH_LANGUAGE} = $self->{CHARSET} eq 'iso-8859-2' ? 1 : 0;
-    $self->{MAXTF_TABLE} = $coll . '_maxtf';
     $self->{MASK_TABLE} = $coll . '_mask';
     $self->{DOCWEIGHTS_TABLE} = $coll . '_docweights';
     $self->{ALL_DOCS_VECTOR_TABLE} = $coll . "_all_docs_vector";
@@ -185,10 +190,6 @@ sub new {
 	$self->{FIELD_NO}->{$field} = $fno;
 	push @{$self->{INVERTED_TABLES}},
 	    ($coll . '_' . $field . '_inverted');
-	if ($self->{PINDEX}) {
-	    push @{$self->{PINDEX_TABLES}},
-		($coll . '_' . $field . '_pindex');
-	}
     	$fno++;
     }
 
@@ -208,7 +209,7 @@ sub new {
 
     # Cache for term_doc postings
     $self->{C} = DBIx::TextIndex::TermDocsCache->new({
-	db => $args->{db},
+	dbd => $args->{dbd},
 	dbh => $self->{INDEX_DBH},
         max_indexed_id => $self->max_indexed_id,
 	inverted_tables => $self->{INVERTED_TABLES},
@@ -232,14 +233,14 @@ sub add_mask {
 
     # Trim ids from end instead here.
     if ($ids->[-1] > $max_indexed_id) {
-	throw $GEN( error => "Greatest doc_id in mask ($mask) is larger than greatest doc_id in index" );
+	throw $GEN( error => "Greatest doc_id ($ids->[-1]) in mask ($mask) is larger than greatest doc_id in index" );
     }
 
     my $vector = Bit::Vector->new($max_indexed_id + 1);
     $vector->Index_List_Store(@$ids);
 
     print "Adding mask ($mask) to table $self->{MASK_TABLE}\n" if $PA > 1;
-    $self->{INDEX_DBH}->do($self->db_add_mask, undef, $mask, $vector->to_Enum);
+    $self->db_add_mask($mask, $vector->to_Enum);
     return 1;
 }
 
@@ -267,14 +268,15 @@ sub add_doc {
     return if $#$ids < 0;
 
     my $add_count = $#$ids + 1;
-    if ($PA) {
-	print "Adding $add_count docs\n";
-    }
+    print "Adding $add_count docs\n" if $PA;
 
     my @sort_ids = sort { $a <=> $b } @$ids;
 
     my @added_ids;
     my $batch_count = 0;
+
+    my $do_prox = $self->{PROXIMITY_INDEX};
+
     foreach my $doc_id (@sort_ids) {
 	print $doc_id if $PA;
 	unless ($self->_ping_doc($doc_id)) {
@@ -284,37 +286,28 @@ sub add_doc {
 
 	foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	    print " field$fno" if $PA;
-
+	    my %positions;
 	    my %frequency;
-	    my $maxtf = 0;
-            my $table = $self->{PINDEX_TABLES}->[$fno];
-	    my @words = $self->_words($self->_fetch_doc($doc_id,
+	    my @terms = $self->_words($self->_fetch_doc($doc_id,
 				      $self->{DOC_FIELDS}->[$fno]));
 
+
 	    # word count
-	    my $wc = 0;
-	    foreach my $word (@words) {
-		$frequency{$word}++;
-		$maxtf = $frequency{$word} if $frequency{$word} > $maxtf;
-                if ($self->{PINDEX}) {
-		    my $sql = $self->db_pindex_add($table);
-		    $self->{INDEX_DBH}->do($sql, undef,
-					   $word, $doc_id, $wc);
-		    print "pindex: adding $doc_id, word: $word, pos: $wc\n"
-			if $PA > 1;
-		}
+	    my $wc = 1;
+	    foreach my $term (@terms) {
+		push @{$positions{$term}}, $wc if $do_prox;
+		$frequency{$term}++;
 		$wc++;
 	    }
 	    print " $wc" if $PA;
-	    
-	    while (my ($word, $frequency) = each %frequency) {
-		$self->_docs($fno, $word, $doc_id, $frequency);
+	    while (my ($term, $frequency) = each %frequency) {
+		$self->_docs($fno, $term, $doc_id, $frequency);
+		$self->_positions($fno, $term, $positions{$term}) if $do_prox;
 	    }
-	    $self->{NEW_MAXTF}->[$fno]->[$doc_id] = $maxtf;
 	    # Doc weight
 	    $self->{NEW_W_D}->[$fno]->[$doc_id] = $wc ?
 		sprintf("%.5f", sqrt((1 + log($wc))**2)) : 0;
-	}	# end of field indexing
+	} # end of field indexing
 	print "\n" if $PA;
 
 	push @added_ids, $doc_id;
@@ -325,7 +318,7 @@ sub add_doc {
 	    $self->{OLD_MAX_INDEXED_ID} = $self->max_indexed_id;
 	    $self->max_indexed_id($added_ids[-1]);
 	    $self->all_doc_ids(@added_ids);
-	    $self->_commit_docs;  
+	    $self->_commit_docs;
 	    $batch_count = 0;
 	    @added_ids = ();
 	}
@@ -336,7 +329,7 @@ sub add_doc {
     $self->{OLD_MAX_INDEXED_ID} = $self->max_indexed_id;
     $self->max_indexed_id($sort_ids[-1]);
     $self->all_doc_ids(@added_ids);
-    $self->_commit_docs;  
+    $self->_commit_docs;
 
     return $add_count;
 
@@ -382,16 +375,8 @@ sub remove_doc {
 	}	# end of each field
     }	# end of each doc
 
-    if ($self->{PINDEX}) {
-	print "Removing docs from proximity index\n" if $PA;
-	$self->_pindex_remove($ids);
-    }
-
     print "Removing docs from docweights table\n" if $PA;
     $self->_docweights_remove($ids);
-
-    print "Removing docs from max term frequency table\n" if $PA;
-    $self->_maxtf_remove($ids);
 
     print "Removing docs from inverted tables\n" if $PA;
     $self->_inverted_remove($ids, \@remove_words);
@@ -401,46 +386,14 @@ sub remove_doc {
     return $total_words; 	# return count of removed words
 }
 
-sub _pindex_remove {
-    my $self = shift;
-    my $docs_ref = shift;
-
-    my $docs = join(', ', @{$docs_ref});
-    foreach my $table (@{$self->{PINDEX_TABLES}}) {
-	my $sql = $self->db_pindex_remove($table, $docs);
-        print "pindex_remove: removing docs: $docs\n" if $PA;
-        $self->{INDEX_DBH}->do($sql);
-    }
-}
-
-sub _maxtf_remove {
-    my $self = shift;
-    my $docs_ref = shift;
-    
-    my @docs = @{$docs_ref};
-    my $use_all_fields = 1;
-    $self->_fetch_maxtf($use_all_fields);
-    
-    my $sql = $self->db_update_maxtf;
-    my $sth = $self->{INDEX_DBH}->prepare($sql);
-    foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
-	my @maxtf = @{$self->{MAXTF}->[$fno]};
-	foreach my $doc_id (@docs) {
-	    $maxtf[$doc_id] = 0;
-	}
-	my $packed_maxtf = pack 'w' x ($#maxtf + 1), @maxtf;
-	$sth->execute($fno, $packed_maxtf);
-    }
-}
-
 sub _docweights_remove {
     my $self = shift;
     my $docs_ref = shift;
-    
+
     my @docs = @{$docs_ref};
     my $use_all_fields = 1;
     $self->_fetch_docweights($use_all_fields);
-    
+
     my $sql = $self->db_update_docweights;
     my $sth = $self->{INDEX_DBH}->prepare($sql);
     foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
@@ -450,7 +403,12 @@ sub _docweights_remove {
 	}
 	my $packed_w_d = pack 'f*', @w_d;
 	# FIXME: we should update the average, leave it alone for now
-	$sth->execute($fno, $self->{AVG_W_D}->[$fno], $packed_w_d);
+	$self->db_update_docweights_execute(
+	    $sth,
+	    $fno,
+	    $self->{AVG_W_D}->[$fno],
+	    $packed_w_d
+	);
     }
 }
 
@@ -458,32 +416,33 @@ sub _inverted_remove {
     my $self = shift;
     my $docs_ref = shift;
     my $words = shift;
-	
+
     my @docs = @{$docs_ref};
     foreach my $fno (0..$#{$self->{DOC_FIELDS}}) {
 	my $field = $self->{DOC_FIELDS}->[$fno];
 	my $table = $self->{INVERTED_TABLES}->[$fno];
 	my $sql;
-	
+
 	$sql = $self->db_inverted_replace($table);
-	my $sth_replace = $self->{INDEX_DBH}->prepare($sql);
+	my $i_sth = $self->{INDEX_DBH}->prepare($sql);
 
 	$sql = $self->db_inverted_select($table);
-	my $sth_select = $self->{INDEX_DBH}->prepare($sql);
-	
+	my $s_sth = $self->{INDEX_DBH}->prepare($sql);
+
 	foreach my $word (keys %{$words->[$fno]}) {
-            $sth_select->execute($word);
-	    my($o_docfreq_t, $o_docs);
-	    $sth_select->bind_columns(\$o_docfreq_t, \$o_docs);
-	    $sth_select->fetch;
-	    
+            $s_sth->execute($word);
+	    my ($o_docfreq_t, $o_term_docs, $o_term_pos);
+
+	    $s_sth->bind_columns(\$o_docfreq_t, \$o_term_docs, \$o_term_pos);
+	    $s_sth->fetch;
+
 	    print "inverted_remove: field: $field: word: $word\n" if $PA;
 	    # @docs_all contains a doc id for each word that
 	    # we are removing
 	    my $docfreq_t = $o_docfreq_t - $words->[$fno]->{$word};
 	    print "inverted_remove: old docfreq_t: $o_docfreq_t\n" if $PA;
 	    print "inverted_remove: new docfreq_t: $docfreq_t\n" if $PA;
-	    
+
 	    # if new docfreq_t is zero, then we should remove the record
             # of this word completely
 	    if ($docfreq_t < 1) {
@@ -495,7 +454,7 @@ sub _inverted_remove {
             }
 
 	    # now we will remove the doc from the "docs" field
-	    my $term_docs = term_docs_arrayref($o_docs);
+	    my $term_docs = term_docs_arrayref($o_term_docs);
 	    my %delete_doc;
 	    @delete_doc{@docs} = (1) x @docs;
 	    my @new_term_docs;
@@ -504,8 +463,13 @@ sub _inverted_remove {
 		push @new_term_docs, ($term_docs->[$i], $term_docs->[$i + 1]);
 	    }
 
-	    $sth_replace->execute($word, $docfreq_t,
-				  pack_term_docs(\@new_term_docs));
+	    $self->db_inverted_replace_execute(
+		$i_sth, 
+	        $word,
+		$docfreq_t,
+		pack_term_docs(\@new_term_docs),
+		$o_term_pos
+	    );
 	}
     }
 }
@@ -614,10 +578,8 @@ sub search {
     my $results = {};
     if ($scoring_method eq 'okapi') {
 	$results = $self->_search_okapi;
-    } elsif ($scoring_method eq 'legacy_tfidf') {
-	$results = $self->_search_legacy_tfidf;
     } else {
-	throw $GEN( error => "Invalid scoring method $scoring_method, select okapi or legacy_tfidf");
+	throw $GEN( error => "Invalid scoring method $scoring_method, only choice is okapi");
     }
     $self->{C}->flush_term_docs;
 
@@ -649,6 +611,7 @@ sub _boolean_search {
 	$self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR}, $self->{RESULT_MASK});
     }
 
+    no warnings qw(uninitialized);
     foreach my $fno (@{$self->{TERM_FIELD_NOS}}) {
 	my %f_t;
 	foreach my $term (@{$self->{TERMS}->[$fno]}) {
@@ -663,6 +626,9 @@ sub _boolean_search {
 }
 
 sub _boolean_search_field {
+
+    no warnings qw(uninitialized);
+
     my $self = shift;
     my ($field_no, $clauses) = @_;
 
@@ -740,35 +706,127 @@ sub _boolean_search_field {
 sub _resolve_phrase {
     my $self = shift;
     my ($fno, $clause) = @_;
+    my (@term_docs, @term_pos);
     my $maxid = $self->max_indexed_id + 1;
     my $and_vec = Bit::Vector->new($maxid);
     $and_vec->Fill;
+
     foreach my $term_clause (@{$clause->{PHRASETERMS}}) {
 	$and_vec->Intersection($and_vec,
-		       $self->{C}->vector($fno, $term_clause->{TERM}));
+			       $self->{C}->vector($fno, $term_clause->{TERM}));
     }
-    
+
     if ($self->{RESULT_MASK}) {
 	$and_vec->Intersection($and_vec, $self->{RESULT_MASK});
     }
 
-    my @and_ids = $and_vec->Index_List_Read;
-    return $and_vec if $#and_ids < 0;
-    unless ($self->{PINDEX}) {
-	return $and_vec if $#and_ids > $self->{PHRASE_THRESHOLD};
-	my $phrase_ids = $self->_phrase_fullscan(\@and_ids, $fno, $clause->{TERM});
-	$and_vec->Empty;
-	$and_vec->Index_List_Store(@$phrase_ids);
-	return $and_vec;
-    } else {
-	my $phrase_ids = $self->_phrase_proximity(\@and_ids, $fno, $clause->{TERM}, $clause->{PROXIMITY});
-	$and_vec->Empty;
-	$and_vec->Index_List_Store(@$phrase_ids);
-	return $and_vec;
+    return $and_vec if $and_vec->is_empty();
+
+
+    foreach my $term_clause (@{$clause->{PHRASETERMS}}) {
+	my $term = $term_clause->{TERM};
+	push @term_docs, $self->{C}->term_docs($fno, $term);
+	push @term_pos, $self->{C}->term_pos($fno, $term);
     }
+
+    my $phrase_ids;
+
+    if ($self->{PROXIMITY_INDEX}) {
+	$phrase_ids = pos_search($and_vec, \@term_docs, \@term_pos, $clause->{PROXIMITY}, $and_vec->Min, $and_vec->Max);
+    } else {
+	my @and_ids = $and_vec->Index_List_Read;
+	return $and_vec if $#and_ids < 0;
+	return $and_vec if $#and_ids > $self->{PHRASE_THRESHOLD};
+	$phrase_ids = $self->_phrase_fullscan(\@and_ids,$fno, $clause->{TERM});
+    }
+
+    $and_vec->Empty;
+    $and_vec->Index_List_Store(@$phrase_ids);
+
+    return $and_vec;
+}
+
+# perl prototype, we use pos_search from TextIndex.xs
+sub pos_search_perl {
+    my ($and_vec, $term_docs, $term_pos, $proximity) = @_;
+    $proximity ||= 1;
+    my @phrase_ids;
+    my $term_count = $#$term_docs + 1;
+    my $and_vec_min = $and_vec->Min;
+    my $and_vec_max = $and_vec->Max;
+    return if $and_vec_min <= 0;
+
+    my @pos_lists;
+    my @td; # term docs
+    my @last_td_pos;
+    my @pos_idx;
+    foreach my $i (0 .. $#$term_docs) {
+	@{$pos_lists[$i]} = unpack 'w*', $term_pos->[$i]; 
+	$td[$i] = term_docs_arrayref($term_docs->[$i]);
+	$last_td_pos[$i] = 0;
+	$pos_idx[$i] = 0;
+    }
+
+    for (my $i = 0 ; $i <= $#{$td[0]} ; $i += 2) {
+	my $doc_id = $td[0]->[$i];
+	my $freq = $td[0]->[$i+1];
+	$pos_idx[0] += $freq;
+	next if ($doc_id < $and_vec_min);
+	next unless $and_vec->contains($doc_id);
+	my @pos_delta =
+	    @{$pos_lists[0]}[$pos_idx[0] - $freq .. $pos_idx[0] - 1];
+	my @pos_first_term;
+	push @pos_first_term, $pos_delta[0];
+	foreach my $a (1 .. $#pos_delta) {
+	    push @pos_first_term, $pos_delta[$a] + $pos_first_term[$a - 1];
+	}
+	my @next_pos;
+	foreach my $j (1 .. $term_count - 1) {
+	    my $freq = 0;
+	    for (my $k = $last_td_pos[$j] ;
+		 $k <= $#{$td[$j]}        ;
+		 $k += 2)
+	    {
+		my $id = $td[$j]->[$k];
+		$freq = $td[$j]->[$k+1];
+		$pos_idx[$j] += $freq;
+		$last_td_pos[$j] = $k;
+		if ($id >= $doc_id) {
+		    $last_td_pos[$j] += 2;
+		    last;
+		}
+
+	    }
+	    my @pos_delta =
+		@{$pos_lists[$j]}[$pos_idx[$j] - $freq .. $pos_idx[$j] - 1];
+	    push @{$next_pos[$j]}, $pos_delta[0];
+	    foreach my $a (1 .. $#pos_delta) {
+		push @{$next_pos[$j]}, $pos_delta[$a] + $next_pos[$j]->[$a - 1];
+	    }
+	}
+	foreach my $pos (@pos_first_term) {
+	    my $seq_count = 1;
+	    my $last_pos = $pos;
+	    foreach my $j (1 .. $term_count - 1) { # FIXME: short circuit the search by remember positions already looked at
+		foreach my $next_pos (@{$next_pos[$j]}) {
+		    if ($next_pos > $last_pos &&
+			$next_pos <= $last_pos + $proximity) {
+			$seq_count++;
+			$last_pos = $next_pos;
+		    }
+		}
+	    }
+	    if ($seq_count == $term_count) {
+		push @phrase_ids, $doc_id;
+	    }
+	}
+	last if $doc_id > $and_vec_max;
+    }
+    return \@phrase_ids;
 }
 
 sub _resolve_plural {
+    no warnings qw(uninitialized);
     my $self = shift;
     my ($fno, $term) = @_;
     my $maxid = $self->max_indexed_id + 1;
@@ -818,10 +876,12 @@ sub _resolve_wild {
 	$max_t = $t, $max_f_t = $f_t if $f_t > $max_f_t;
 	$terms_union->Union($terms_union, $self->{C}->vector($fno, $t));
     }
-    $self->{F_T}->[$fno]->{$term} = int($sum_f_t/$count);
-    # FIXME: need to do a real merge
-    $self->{TERM_DOCS}->[$fno]->{$term} = $self->{C}->term_docs($fno, $max_t);
-
+    if ($count) {
+	$self->{F_T}->[$fno]->{$term} = int($sum_f_t/$count);
+	# FIXME: need to do a real merge
+	$self->{TERM_DOCS}->[$fno]->{$term} = $self->{C}->term_docs($fno, $max_t);
+    }
+    # FIXME: what should TERM_DOCS contain if count is 0?
     return $terms_union;
 }
 
@@ -838,6 +898,7 @@ sub _flush_cache {
     delete($self->{F_QT});
     delete($self->{F_T});
     delete($self->{TERM_DOCS});
+    delete($self->{TERM_POS});
     # check to see if documents have been added since we last called new()
     my $new_max_indexed_id = $self->fetch_max_indexed_id;
     if (($new_max_indexed_id != $self->{MAX_INDEXED_ID})
@@ -917,28 +978,18 @@ sub delete {
 
     print "Dropping mask table ($self->{MASK_TABLE})\n" if $PA;
     $self->db_drop_table($self->{MASK_TABLE});
-    
+
     print "Dropping docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
     $self->db_drop_table($self->{DOCWEIGHTS_TABLE});
 
-    print "Dropping max term frequency table ($self->{MAXTF_TABLE})\n" if $PA;
-    $self->db_drop_table($self->{MAXTF_TABLE});
-
-    print "Dropping docs vector table ($self->{MAXTF_TABLE})\n" if $PA;
+    print "Dropping docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n"
+	if $PA;
     $self->db_drop_table($self->{ALL_DOCS_VECTOR_TABLE});
 
     foreach my $table ( @{$self->{INVERTED_TABLES}} ) {
 	print "Dropping inverted table ($table)\n" if $PA;
 	$self->db_drop_table($table);
     }
-
-    if ($self->{PINDEX}) {
-	foreach my $table ( @{$self->{PINDEX_TABLES}} ) {
-	    print "Dropping proximity table ($table)\n"	if $PA;
-	    $self->db_drop_table($table);
-    	} 
-    }
-
 }
 
 sub _collection_table_exists {
@@ -1075,10 +1126,16 @@ sub _store_collection_info {
     my $stoplists = ref $self->{STOPLIST} ?
 	join (',', @{$self->{STOPLIST}}) : '';
 
+    my $version = $DBIx::TextIndex::VERSION;
+
+    if ($version =~ m/(\d+)\.(\d+)\.(\d+)/) {
+	$version = "$1.$2$3" + 0;
+    }
+
     $self->{INDEX_DBH}->do($sql, undef,
 
 			   $self->{COLLECTION},
-			   $DBIx::TextIndex::VERSION,
+			   $version,
 			   $self->{MAX_INDEXED_ID},
 			   $self->{DOC_TABLE},
 			   $self->{DOC_ID_FIELD},
@@ -1086,7 +1143,7 @@ sub _store_collection_info {
 			   $doc_fields,
 			   $self->{CHARSET},
 			   $stoplists,
-			   $self->{PINDEX},
+			   $self->{PROXIMITY_INDEX},
 
 			   $ERROR{empty_query},
 			   $ERROR{quote_count},
@@ -1128,8 +1185,8 @@ sub _fetch_collection_info {
 
     $fetch_status = 1 if $sth->rows;
 
-    my $doc_fields;
-    my $stoplists;
+    my $doc_fields = '';
+    my $stoplists = '';
 
     my $null;
     $sth->bind_columns(\(
@@ -1142,7 +1199,7 @@ sub _fetch_collection_info {
 		       $doc_fields,
 		       $self->{CHARSET},
 		       $stoplists,
-		       $self->{PINDEX},
+		       $self->{PROXIMITY_INDEX},
 
 		       $ERROR{empty_query},
 		       $ERROR{quote_count},
@@ -1162,12 +1219,13 @@ sub _fetch_collection_info {
     $sth->fetch;
     $sth->finish;
 
-    my @doc_fields = split /,/, $doc_fields;
+    my @doc_fields = split(/,/, $doc_fields);
     my @stoplists = split (/,\s*/, $stoplists);
 
     $self->{DOC_FIELDS} = \@doc_fields;
     $self->{STOPLIST} = \@stoplists;
 
+    $self->{CHARSET} = $self->{CHARSET} || $CHARSET_DEFAULT;
     $self->{CZECH_LANGUAGE} = $self->{CHARSET} eq 'iso-8859-2' ? 1 : 0;
 
     return $fetch_status;
@@ -1217,128 +1275,6 @@ sub _phrase_fullscan {
     return \@found;
 }
 
-sub _phrase_proximity {
-    my $self = shift;
-    my $docref = shift;
-    my $fno = shift;
-    my $phrase = shift;
-    my $proximity = shift;
-
-    my @docs = @{$docref};
-    my $docs = join(',', @docs);
-    my @found;
-
-    my @pwords = grep { length($_) > 0 } split(/[^a-zA-Z0-9]+/, $phrase);
-
-    if ($PA) {
-	print "phrase search: proximity scan for words: ";
-	local $, = ', ';
-	print @pwords;
-	print "\n";
-    }
-
-    my $pwords = join(',', map { $self->{INDEX_DBH}->quote($_) } @pwords);
-    my $sql = $self->db_pindex_search($fno,	$pwords, $docs);
-
-    my $sth = $self->{INDEX_DBH}->prepare($sql);
-    my $rows = $sth->execute;
-    my($word, $doc, $pos);
-    my %doc;
-    my $last_doc = 0;
-    $sth->bind_columns(\$word, \$doc, \$pos);
-    my $i = 0;
-
-    while($sth->fetch) {
-	$i++;
-	if ( ($doc != $last_doc && $last_doc != 0) || $i == $rows) {
-	    
-            # process the previous/last doc
-	    
-	    push(@{$doc{$word}}, $pos) if ($i == $rows);	# last doc
-
-	    if ($self->_proximity_match($proximity, $last_doc, \@pwords,
-					\%doc)) {
-		push(@found, $last_doc);
-		print "phrase: proximity MATCHED doc $last_doc\n"
-		    if $PA;
-	    } else {
-		print "phrase: proximity NOT matched doc $last_doc\n"
-		    if $PA;
-	    }
-	    %doc = 0;	# remove all words from this doc
-    	}
-
-	push(@{$doc{$word}}, $pos);
-	$last_doc = $doc;
-    }
-
-    return \@found;
-}
-
-sub _proximity_match {
-    my $self = shift;
-    my ($proximity, $doc_id, $pwords, $doc) = @_;
-
-    my $occur = 1;
-    my $match = 0;
-    print "phrase: proximity searching doc $doc_id\n" if $PA;
-
-    foreach my $fword_pos (@{$doc->{$pwords->[0]}}) {
-        $match = 0;
-        print qq(base phrase word "$pwords->[0]",if occurency $occur at $fword_pos\n)
-	    if $PA > 1;
-        for(my $i = 0; $i < @{$pwords} - 1; $i++) {
-            $match = 0;
-            my $window = $i + $proximity;
-            foreach my $sword_pos (@{$doc->{$pwords->[$i+1]}}) {
-                print "sequence word $pwords->[$i+1] at $sword_pos\n"
-                    if $PA > 1;
-                if ($sword_pos > $fword_pos &&
-                    $sword_pos <= $fword_pos + $window) {
-                    $match = 1;
-                    print "sequence word $pwords->[$i+1] at $sword_pos matched\n"
-                        if $PA > 1;
-                    last;
-                }
-            }
-            last if (not $match);
-        }	# end of all neccessary scan
-        if ($match) {
-            print "phrase: doc $doc_id, occurency $occur matched\n"
-                if $PA > 1;
-            last;
-        }
-
-        $occur++;
-    } # end of occurencies
-
-    return $match;
-}
-
-sub _fetch_maxtf {
-    my $self = shift;
-    my $use_all_fields = shift;
-
-    my $fnos;
-    if ($use_all_fields) {
-	$fnos = join ',', (0 .. $#{$self->{DOC_FIELDS}});
-    } else {
-	$fnos = join ',', @{$self->{TERM_FIELD_NOS}};
-    }
-    
-    my $sql = $self->db_fetch_maxtf($fnos);
-
-    my $sth = $self->{INDEX_DBH}->prepare($sql);
-
-    $sth->execute || warn $DBI::errstr;
-
-    while (my $row = $sth->fetchrow_arrayref) {
-	$self->{MAXTF}->[$row->[0]] = [(unpack 'w*', $row->[1])];
-    }
-
-    $sth->finish;
-}
-
 sub _fetch_docweights {
     my $self = shift;
     my $all_fields = shift;
@@ -1374,6 +1310,8 @@ sub _fetch_docweights {
 }
 
 sub _search_okapi {
+
+    no warnings qw(uninitialized);
 
     my $self = shift;
 
@@ -1424,105 +1362,6 @@ sub _search_okapi {
 	}
     }
     return \%score;
-}
-
-sub _search_legacy_tfidf {
-
-    my $self = shift;
-
-    my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
-
-    my %score;
-
-    throw $QRY( error => $ERROR{'no_results'} ) if $#result_docs < 0;
-
-    # Special case: only one word in query and word is not very selective,
-    # so don't bother tf-idf scoring, just return results sorted by docfreq_tt
-    my @and_plus_or_words;
-    foreach my $fno ( @{$self->{TERM_FIELD_NOS}} ) {
-	push @and_plus_or_words, @{$self->{TERMS}->[$fno]};
-    }
-
-    my $and_plus_or = $#and_plus_or_words + 1;
-    if ($and_plus_or == 1 && $#result_docs > $self->{RESULT_THRESHOLD}) {
-	my $fno = $self->{TERM_FIELD_NOS}->[0];
-	my $word = $and_plus_or_words[0];
-
-	my $f_t = $self->{C}->f_t($fno, $word);
-
-	# idf should use a collection size instead of max_indexed_id
-
-	my $idf;
-	if ($f_t) {
-	    $idf = log($self->{MAX_INDEXED_ID}/$f_t);
-	} else {
-	    $idf = 0;
-	}
-
-	throw $QRY( error => $ERROR{'no_results'} )
-	    if $idf < $IDF_MIN_LEGACY_TFIDF;
-
-	my $raw_score = $self->_docs($fno, $word);
-
-	if ($self->{VALID_MASK}) {
-	    foreach my $doc_id (@result_docs) {
-		$score{$doc_id} = $raw_score->{$doc_id};
-	    }
-	    return \%score;
-	} else {
-	    return $raw_score;
-	}
-
-    }
-
-    # Otherwise do tf-idf
-    $self->_fetch_maxtf;
-    foreach my $fno ( @{$self->{TERM_FIELD_NOS}} ) {
-      WORD:
-	foreach my $word (@{$self->{TERMS}->[$fno]}) {
-	    my $f_t = $self->{C}->f_t($fno, $word);
-	    # next WORD unless defined $f_t;
-	    $f_t = 1 unless defined $f_t;
-
-	    my $idf;
-	    if ($f_t) {
-		$idf = log($self->{MAX_INDEXED_ID}/$f_t);
-	    } else {
-		$idf = 0;
-	    }
-
-	    next WORD if $idf < $IDF_MIN_LEGACY_TFIDF;
-
-	    my $word_score = $self->_docs($fno, $word);
-
-	  DOC_ID:
-
-	    foreach my $doc_id (@result_docs) {
-		# next DOC_ID unless defined $word_score->{$doc_id};
-		$word_score->{$doc_id} = 1 unless
-		    defined $word_score->{$doc_id};
-		
-		my $maxtf = $self->{MAXTF}->[$fno]->[$doc_id];
-		my $sqrt_maxtf = sqrt($maxtf);
-		$sqrt_maxtf = 1 unless $sqrt_maxtf;
-		if ($score{$doc_id}) {
-		    $score{$doc_id} *=
-			(1 + (($word_score->{$doc_id}/$sqrt_maxtf) * $idf));
-		} else {
-		    $score{$doc_id} = (1 + (($word_score->{$doc_id}/$sqrt_maxtf) * $idf));
-		}
-	    }
-	}
-    }
-    unless (scalar keys %score) {
-	if (not @{$self->{STOPLISTED_QUERY}}) {
-	    throw $QRY( error => $ERROR{no_results} );
-	} else {
-	    throw $QRY( error => $self->_format_stoplisted_error );
-	}
-    }
-    return \%score;
-
 }
 
 sub _format_stoplisted_error {
@@ -1706,13 +1545,12 @@ sub _fetch_mask {
 sub _lc_and_unac {
     my $self = shift;
     my $s = shift;
-    $s = unac_string($self->{CHARSET}, $s);
+    $s = unac_string($self->{CHARSET}, $s) if DO_UNAC;
     $s = lc($s);
     return $s;
 }
 
 sub _docs {
-
     my $self = shift;
     my $fno = shift;
     my $term = shift;
@@ -1726,42 +1564,32 @@ sub _docs {
     }
 }
 
+sub _positions {
+    my $self = shift;
+    my $fno = shift;
+    my $term = shift;
+    if (@_) {
+	my $positions = shift;
+	$self->{TERM_POS}->[$fno]->{$term} .=
+	    pack_vint_delta($positions);
+    }
+}
+
+
 sub _commit_docs {
     my $self = shift;
 
     my ($sql, $sth);
     my $id_a = $self->{OLD_MAX_INDEXED_ID} + 1;
     my $id_b = $self->{MAX_INDEXED_ID};
-    print "Storing max term frequency for each doc\n" if $PA;
-
-    $self->_fetch_maxtf(1);
-
-    $sth = $self->{INDEX_DBH}->prepare($self->db_update_maxtf);
-
-    foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
-	my @maxtf;
-	if ($#{$self->{MAXTF}->[$fno]} >= 0) {
-	    @maxtf = @{$self->{MAXTF}->[$fno]};
-	    @maxtf[$id_a .. $id_b] =
-		@{$self->{NEW_MAXTF}->[$fno]}[$id_a .. $id_b];
-	} else {
-	    @maxtf = @{$self->{NEW_MAXTF}->[$fno]};
-	}
-	$maxtf[0] = 0 unless defined $maxtf[0];
-	my $packed_maxtf = pack 'w' x ($#maxtf + 1), @maxtf;
-	$sth->execute($fno, $packed_maxtf);
-    }
-    # Delete temporary in-memory structure
-    delete($self->{NEW_MAXTF});
-
-    $sth->finish;
 
     print "Storing doc weights\n" if $PA;
 
     $self->_fetch_docweights(1);
-    
+
     $sth = $self->{INDEX_DBH}->prepare($self->db_update_docweights);
 
+    no warnings qw(uninitialized);
     foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	my @w_d;
 	if ($#{$self->{W_D}->[$fno]} >= 0) {
@@ -1780,7 +1608,7 @@ sub _commit_docs {
 	$w_d[0] = 0 unless defined $w_d[0];
 	# FIXME: this takes too much space
 	my $packed_w_d = pack 'f*', @w_d;
-	$sth->execute($fno, $avg_w_d, $packed_w_d);
+	$self->db_update_docweights_execute($sth, $fno, $avg_w_d, $packed_w_d) 
     }
     # Delete temporary in-memory structure
     delete($self->{NEW_W_D});
@@ -1795,35 +1623,40 @@ sub _commit_docs {
 	my $s_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_select($self->{INVERTED_TABLES}->[$fno]) );
 
 	my $wc = 0;
-	while (my ($word, $term_docs_vint) = each %{$self->{TERM_DOCS_VINT}->[$fno]}) {
-	    print "$word\n" if $PA >= 2;
+	while (my ($term, $term_docs_vint) = each %{$self->{TERM_DOCS_VINT}->[$fno]}) {
+	    print "$term\n" if $PA >= 2;
 	    if ($PA && $wc > 0) {
 		print "committed $wc words\n" if $wc % 500 == 0;
 	    }
 
 	    my $o_docfreq_t = 0;
 	    my $o_term_docs = '';
+	    my $o_term_pos = '';
 
-	    $s_sth->execute($word);
-
-	    $s_sth->bind_columns(\$o_docfreq_t, \$o_term_docs);
-
+	    $s_sth->execute($term);
+	    $s_sth->bind_columns(\$o_docfreq_t, \$o_term_docs, \$o_term_pos);
 	    $s_sth->fetch;
 
 	    my $term_docs = pack_term_docs_append_vint($o_term_docs, $term_docs_vint);
 
-	    $i_sth->execute(
-	        $word,
-		$self->{DOCFREQ_T}->[$fno]->{$word} + $o_docfreq_t,
-		$term_docs,
-	    ) or warn $self->{INDEX_DBH}->err;
+	    my $term_pos = $o_term_pos . $self->{TERM_POS}->[$fno]->{$term};
 
-	    delete($self->{TERM_DOCS_VINT}->[$fno]->{$word});
+	    $self->db_inverted_replace_execute(
+		$i_sth, 
+	        $term,
+		$self->{DOCFREQ_T}->[$fno]->{$term} + $o_docfreq_t,
+		$term_docs,
+		$term_pos,
+	    );
+
+	    delete($self->{TERM_DOCS_VINT}->[$fno]->{$term});
+            delete($self->{TERM_POS}->[$fno]->{$term});
 	    $wc++;
 	}
 	print "committed $wc words\n" if $PA && $wc > 0;
 	# Flush temporary hashes after data is stored
 	delete($self->{TERM_DOCS_VINT}->[$fno]);
+	delete($self->{TERM_POS}->[$fno]);
 	delete($self->{DOCFREQ_T}->[$fno]);
     }
 }
@@ -1858,7 +1691,8 @@ sub all_doc_ids {
     if (ref $ids[0] eq 'ARRAY') {
 	@ids = @{$ids[0]};
     }
-
+    
+    no warnings qw(uninitialized);
     unless (ref $self->{ALL_DOCS_VECTOR}) {
 	$self->{ALL_DOCS_VECTOR} = Bit::Vector->new_Enum(
             $self->max_indexed_id + 1,
@@ -1957,18 +1791,10 @@ sub _create_tables {
     print "Creating docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
     $self->{INDEX_DBH}->do($sql);
 
-    # max term frequency table
-
-    print "Dropping max term frequency table ($self->{MAXTF_TABLE})\n" if $PA;
-    $self->db_drop_table($self->{MAXTF_TABLE});
-
-    $sql = $self->db_create_maxterm_table;
-    print "Creating max term frequency table ($self->{MAXTF_TABLE})\n" if $PA;
-    $self->{INDEX_DBH}->do($sql);
-
     # docs vector table
 
-    print "Dropping docs vector table ($self->{MAXTF_TABLE})\n" if $PA;
+    print "Dropping docs vector table ($self->{ALL_DOC_VECTOR_TABLE})\n"
+	if $PA;
     $self->db_drop_table($self->{ALL_DOCS_VECTOR_TABLE});
 
     $sql = $self->db_create_all_docs_vector_table;
@@ -1984,17 +1810,6 @@ sub _create_tables {
 	$sql = $self->db_create_inverted_table($table);
 	print "Creating inverted table ($table)\n" if $PA;
 	$self->{INDEX_DBH}->do($sql);
-    }
-
-    if ($self->{PINDEX}) {
-	foreach my $table ( @{$self->{PINDEX_TABLES}} ) {
-	    $self->db_drop_table($table);
-	    print "Dropping proximity table ($table)\n"	if $PA;
-
-	    $sql = $self->db_pindex_create($table);
-	    print "Creating proximity table ($table)\n" if $PA;
-	    $self->{INDEX_DBH}->do($sql);
-	}
     }
 }
 
@@ -2030,8 +1845,7 @@ DBIx::TextIndex - Perl extension for full-text searching in SQL databases
      doc_id_field => 'primary_key',
      index_dbh => $index_dbh,
      collection => 'collection_1',
-     db => 'mysql',
-     proximity_index => 0,
+     proximity_index => 1,
      errors => {
          empty_query => "your query was empty",
          quote_count => "phrases must be quoted correctly",
@@ -2127,11 +1941,8 @@ underscores [A-Za-z0-9_]
 
 =item proximity_index
 
-Activates a proximity index for faster phrase searches and word
-proximity based matching. Disabled by default. Only efficient for
-bigger documents.  Takes up a lot of space and slows down the indexing
-process.  Proximity based matching is activated by a query containing
-a phrase in form of:
+Newer compressed proximity index is turned on by default as of version
+0.22.
 
 	"some phrase"~2 => matches "some nice phrase"
 	"some phrase"~1 => matches only exact "some phrase"
@@ -2145,13 +1956,10 @@ The proximity matches work only forwards, not backwards, that means:
 
 =item db
 
-SQL used in this module is database specific in some aspects.  In
-order to use this module with a variety of databases, so called
-"database module" can be specified. Default is the B<mysql> module.
-Another modules have yet to be written.
-
-Names of the database modules correspond to the names of DBI drivers
-and are case sensitive.
+In past versions, the database driver name was passed in this argument.
+As of version 0.22, the driver name is read from the database handle
+passed to index_dbh.  Both MySQL (DBD::mysql) and PostgreSQL (DBD::Pg) are
+supported.
 
 =item errors
 
@@ -2244,19 +2052,6 @@ index. The ids should be sorted from lowest to highest.
 It's actually not possible to completely recover the space taken by
 the documents that are removed, therefore it's recommended to rebuild
 the index when you remove a significant amount of documents.
-
-All space reserved in the proximity index is recovered.  Approx. 75%
-of space reserved in the inverted tables and max term frequency table
-is recovered.
-
-=head2 $index->disable_doc(\@doc_ids)
-
-This method can be used to disable documents. Disabled documents are
-not included in search results. This method should be used to "remove"
-documents from the index. Disabled documents are not actually removed
-from the index, therefore its size will remain the same. It's
-recommended to rebuild the index when you disable a significant amount
-of documents.
 
 =head2 $index->search(\%search_args)
 
@@ -2475,14 +2270,13 @@ Diacritics sensitive operation is not possible.
 B<Requires the module "CzFast" that is available on CPAN in directory
 of author "TRIPIE".>
 
-=head1 AUTHORS
+=head1 AUTHOR
 
 Daniel Koch, dkoch@bizjournals.com.
-Contributions by Tomas Styblo, tripie@cpan.org.
 
 =head1 COPYRIGHT
 
-Copyright 1997-2003 by Daniel Koch.
+Copyright 1997-2004 by Daniel Koch.
 All rights reserved.
 
 =head1 LICENSE
@@ -2501,14 +2295,16 @@ See the "GNU General Public License" for more details.
 
 =head1 ACKNOWLEDGEMENTS
 
+Thanks to Jim Blomo, for PostgreSQL patches.
+
 Thanks to the lucy project (http://www.seg.rmit.edu.au/lucy/) for
 ideas and code for the Okapi scoring function.
 
 Simon Cozens' Lucene::QueryParser module was adapted to create the
 DBIx::TextIndex QueryParser module.
 
-Special thanks to Tomas Styblo, for proximity index support, Czech
-language support, stoplists, highlighting, document removal and many
+Special thanks to Tomas Styblo, for first version of proximity index,
+Czech language support, stoplists, highlighting, document removal and many
 other improvements.
 
 Thanks to Ulrich Pfeifer for ideas and code from Man::Index module
@@ -2522,8 +2318,6 @@ Bit::Vector is required by DBIx::TextIndex.
 =head1 BUGS
 
 Documentation is not complete.
-
-Phrase indexing is not scalable.
 
 Please feel free to email me (dkoch@bizjournals.com) with any questions
 or suggestions.

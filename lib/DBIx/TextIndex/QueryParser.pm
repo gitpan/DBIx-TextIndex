@@ -2,7 +2,7 @@ package DBIx::TextIndex::QueryParser;
 
 use strict;
 
-our $VERSION = '0.20';
+our $VERSION = '0.22';
 
 use base qw(DBIx::TextIndex);
 
@@ -117,7 +117,30 @@ sub _parse {
 	}
 	push @clauses, $clause;
     }
-    return \@clauses;
+    my $folded = fold_nested_phrases(\@clauses);
+    return $folded;
+}
+
+sub fold_nested_phrases {
+    my $clauses = shift;
+    my @folded;
+    foreach my $clause (@$clauses) {
+	if ($clause->{TYPE} eq 'PHRASE' ||
+	    $clause->{TYPE} eq 'IMPLICITPHRASE') {
+	    my @folded_terms;
+	    foreach my $phraseterm (@{$clause->{PHRASETERMS}}) {
+		if ($phraseterm->{TYPE} eq 'IMPLICITPHRASE') {
+		    push @folded_terms,
+		        fold_nested_phrases($phraseterm->{PHRASETERMS});
+		} else {
+		    push @folded_terms, $phraseterm;
+		}
+	    }
+	    $clause->{PHRASETERMS} = \@folded_terms;
+	}
+	push @folded, $clause;
+    }
+    return wantarray ? @folded : \@folded;
 }
 
 1;

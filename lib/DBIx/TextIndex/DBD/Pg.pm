@@ -1,16 +1,17 @@
-#!/usr/bin/perl
-
-# MySQL module for DBIx::TextIndex
+# PostgreSQL module for DBIx::TextIndex
 
 use strict;
+use DBD::Pg;
 
 sub db_add_mask {
     my $self = shift;
-    return <<END;
-replace into $self->{MASK_TABLE} (mask, docs_vector)
-values (?, ?)
+    my ($mask, $vector_enum) = @_;
+    my $sql = <<END;
+DELETE FROM $self->{MASK_TABLE} where mask = ?;
+INSERT into $self->{MASK_TABLE} (mask, docs_vector) values (?, ?)
 END
 
+    $self->{INDEX_DBH}->do($sql, undef, $mask, $mask, $vector_enum);
 }
 
 sub db_delete_mask {
@@ -25,22 +26,17 @@ END
 sub db_drop_table {
     my $self = shift;
     my $table = shift;
-    my $sql = <<END;
-drop table if exists $table
-END
 
-    $self->{INDEX_DBH}->do($sql);
-
+	if( $self->{INDEX_DBH}->selectrow_array("SELECT tablename FROM pg_tables WHERE tablename = '$table'") ) {
+		$self->{INDEX_DBH}->do("DROP TABLE $table");
+	}
 }
 
 sub db_table_exists {
     my $self = shift;
     my $table = shift;
-    # FIXME: $dbh->tables is marked deprecated in DBI 1.30 documentation
-    my @tables = $self->{INDEX_DBH}->tables;
-    for (@tables) {
-	return 1 if m/^\`?$table\`?$/;
-    }
+
+	return 1 if $self->{INDEX_DBH}->selectrow_array("SELECT tablename FROM pg_tables WHERE tablename = '$table'");
     return 0;
 }
 
@@ -48,27 +44,26 @@ sub db_create_collection_table {
     my $self = shift;
     return <<END;
 CREATE TABLE collection (
-  collection varchar(30) NOT NULL default '',
-  version decimal(10,2) NOT NULL default '0.00',
-  max_indexed_id int(10) unsigned NOT NULL default '0',
+  collection varchar(30) PRIMARY KEY default '',
+  version numeric(10,2) NOT NULL default 0.00,
+  max_indexed_id int NOT NULL default 0,
   doc_table varchar(30) NOT NULL default '',
   doc_id_field varchar(30) NOT NULL default '',
   doc_fields varchar(250) NOT NULL default '',
   charset varchar(50) NOT NULL default '',
   stoplist varchar(255) NOT NULL default '',
-  proximity_index enum('0', '1') NOT NULL default '0',
+  proximity_index varchar(1) NOT NULL default '0',
   error_empty_query varchar(255) NOT NULL default '',
   error_quote_count varchar(255) NOT NULL default '',
   error_no_results varchar(255) NOT NULL default '',
   error_no_results_stop varchar(255) NOT NULL default '',
-  max_word_length int(10) unsigned NOT NULL default '0',
-  result_threshold int(10) unsigned NOT NULL default '0',
-  phrase_threshold int(10) unsigned NOT NULL default '0',
-  min_wildcard_length int(10) unsigned NOT NULL default '0',
-  decode_html_entities enum('0', '1') NOT NULL default '0',
+  max_word_length int NOT NULL default 0,
+  result_threshold int NOT NULL default 0,
+  phrase_threshold int NOT NULL default 0,
+  min_wildcard_length int NOT NULL default 0,
+  decode_html_entities varchar(1) NOT NULL default '0',
   scoring_method varchar(20) NOT NULL default '',
-  update_commit_interval int(10) unsigned NOT NULL default '0',
-  PRIMARY KEY collection_key (collection)
+  update_commit_interval int NOT NULL default 0
 )
 END
 
@@ -210,18 +205,6 @@ END
 
 }
 
-sub db_fetch_maxtf {
-    my $self = shift;
-    my $fields = shift;
-
-    return <<END;
-select field_no, maxtf
-from $self->{MAXTF_TABLE}
-where field_no in ($fields)
-END
-
-}
-
 sub db_fetch_docweights {
     my $self = shift;
     my $fields = shift;
@@ -233,7 +216,6 @@ where field_no in ($fields)
 END
 
 }
-
 
 sub db_fetch_all_docs_vector {
     my $self = shift;
@@ -247,21 +229,11 @@ END
 sub db_update_all_docs_vector {
     my $self = shift;
     return <<END;
-REPLACE INTO $self->{ALL_DOCS_VECTOR_TABLE}
+DELETE FROM $self->{ALL_DOCS_VECTOR_TABLE} WHERE id = 1;
+INSERT INTO $self->{ALL_DOCS_VECTOR_TABLE}
 (id, all_docs_vector)
 VALUES (1, ?)
 END
-}
-
-sub db_docfreq_t {
-    my $self = shift;
-    my $table = shift;
-
-    return <<END;
-select docfreq_t from $table
-where word = ?
-END
-
 }
 
 sub db_fetch_mask {
@@ -271,6 +243,18 @@ sub db_fetch_mask {
 select docs_vector
 from $self->{MASK_TABLE}
 where mask = ?
+END
+
+}
+
+sub db_fetch_term_pos {
+    my $self = shift;
+    my $table = shift;
+
+    return <<END;
+select term_pos
+from $table
+where word = ?
 END
 
 }
@@ -333,24 +317,24 @@ END
 
 }
 
-sub db_update_maxtf {
-    my $self = shift;
-
-    return <<END;
-replace into $self->{MAXTF_TABLE} (field_no, maxtf)
-values (?, ?)
-END
-
-}
-
 sub db_update_docweights {
     my $self = shift;
 
     return <<END;
-replace into $self->{DOCWEIGHTS_TABLE} (field_no, avg_docweight, docweights)
-values (?, ?, ?)
+DELETE FROM $self->{DOCWEIGHTS_TABLE} WHERE field_no = ?;
+INSERT into $self->{DOCWEIGHTS_TABLE} (field_no, avg_docweight, docweights) values (?, ?, ?)
 END
 
+}
+
+sub db_update_docweights_execute {
+    my $self = shift;
+    my ($sth, $fno, $avg_w_d, $packed_w_d) = @_;
+    $sth->bind_param( 1, $fno );
+    $sth->bind_param( 2, $fno );
+    $sth->bind_param( 3, $avg_w_d );
+    $sth->bind_param( 4, $packed_w_d, { pg_type => DBD::Pg::PG_BYTEA } );
+    $sth->execute();
 }
 
 sub db_inverted_replace {
@@ -358,11 +342,24 @@ sub db_inverted_replace {
     my $table = shift;
 
     return <<END;
-replace into $table
-(word, docfreq_t, term_docs)
-values (?, ?, ?)
+DELETE FROM $table WHERE word = ?;
+INSERT into $table
+(word, docfreq_t, term_docs, term_pos)
+values (?, ?, ?, ?)
 END
 
+}
+
+sub db_inverted_replace_execute {
+    my $self = shift;
+    my ($sth, $term, $docfreq_t, $term_docs, $term_pos) = @_;
+
+    $sth->bind_param( 1, $term );
+    $sth->bind_param( 2, $term );
+    $sth->bind_param( 3, $docfreq_t );
+    $sth->bind_param( 4, $term_docs, { pg_type => DBD::Pg::PG_BYTEA } );
+    $sth->bind_param( 5, $term_pos, { pg_type => DBD::Pg::PG_BYTEA } );
+    $sth->execute() or warn $self->{INDEX_DBH}->err;
 }
 
 sub db_inverted_remove {
@@ -381,7 +378,7 @@ sub db_inverted_select {
     my $table = shift;
 
     return <<END;
-select docfreq_t, term_docs
+select docfreq_t, term_docs, term_pos
 from $table
 where word = ?
 END
@@ -393,10 +390,9 @@ sub db_create_mask_table {
 
     return <<END;
 create table $self->{MASK_TABLE} (
-  mask             varchar(100)            not null,
-  docs_vector mediumblob 	           not null,
-  primary key 	   mask_key (mask)
-)
+  mask             varchar(100) primary key,
+  docs_vector text 	           not null
+);
 END
 
 }
@@ -405,25 +401,11 @@ sub db_create_docweights_table {
     my $self = shift;
     return <<END;
 create table $self->{DOCWEIGHTS_TABLE} (
-  field_no 	   smallint unsigned 	   not null,
+  field_no 	   integer 	   primary key,
   avg_docweight    float                   not null,
-  docweights 	   mediumblob 		   not null,
-  primary key 	   field_no_key (field_no)
+  docweights 	   bytea 		   not null
 )
 END
-}
-
-sub db_create_maxterm_table {
-    my $self = shift;
-
-    return <<END;
-create table $self->{MAXTF_TABLE} (
-  field_no 	   smallint unsigned 	   not null,
-  maxtf 	   mediumblob 		   not null,
-  primary key 	   field_no_key (field_no)
-)
-END
-
 }
 
 sub db_create_all_docs_vector_table {
@@ -431,9 +413,8 @@ sub db_create_all_docs_vector_table {
 
     return <<END;
 CREATE TABLE $self->{ALL_DOCS_VECTOR_TABLE} (
-  id               INT UNSIGNED            NOT NULL,
-  all_docs_vector  MEDIUMBLOB              NOT NULL,
-  UNIQUE KEY       id_key (id)
+  id               INT PRIMARY KEY,
+  all_docs_vector  text              NOT NULL
 )
 END
 }
@@ -445,69 +426,14 @@ sub db_create_inverted_table {
 
     return <<END;
 create table $table (
-  word             varchar($max_word)      not null,
-  docfreq_t 	   int unsigned 	   not null,
-  term_docs	   mediumblob 		   not null,
-  PRIMARY KEY 	   word_key (word)
+  word             varchar($max_word)      primary key,
+  docfreq_t 	   int                     not null,
+  term_docs	   bytea 		   not null,
+  term_pos         bytea                   not null
 )
 END
 
 }
-
-sub db_pindex_search {
-    my $self = shift;
-    my $fno = shift;
-    my $words = shift;
-    my $docs = shift;
-
-    return <<END;
-select word, doc, pos
-from $self->{PINDEX_TABLES}->[$fno]
-where doc in ($docs) and word in ($words)
-order by doc
-END
-
-}
-
-sub db_pindex_create {
-    my $self = shift;
-    my $table = shift;
-    my $max_word = $self->{MAX_WORD_LENGTH};
-
-    return <<END;
-create table $table (
-  word		   varchar($max_word)	   not null,
-  doc	           integer                 not null,
-  pos		   integer		   not null,
-  index		   (doc, word)
-)
-END
-
-}
-
-sub db_pindex_add {
-    my $self = shift;
-    my $table = shift;
-
-    return <<END;
-insert into $table (word, doc, pos)
-values (?, ?, ?)
-END
-
-}
-
-sub db_pindex_remove {
-    my $self = shift;
-    my $table = shift;
-    my $docs = shift;
-
-    return <<END;
-delete from $table
-where doc in ($docs)
-END
-
-}
-
 
 sub db_total_words {
     my $self = shift;
