@@ -102,15 +102,7 @@ sub vector {
     return $vector;
 }
 
-# Same as docfreq_t
 sub f_t {
-    my $self = shift;
-    my ($fno, $term) = @_;
-    $self->_fetch_term_docs($fno, $term) unless exists $self->{DOCFREQ_T}->[$fno]->{$term};
-    return $self->{DOCFREQ_T}->[$fno]->{$term};
-}
-
-sub docfreq_t {
     my $self = shift;
     my ($fno, $term) = @_;
     $self->_fetch_term_docs($fno, $term) unless exists $self->{DOCFREQ_T}->[$fno]->{$term};
@@ -136,13 +128,3 @@ sub _fetch_term_docs {
     ($self->{DOCFREQ_T}->[$fno]->{$term}, $self->{TERM_DOCS}->[$fno]->{$term})
 	= $self->{DBH}->selectrow_array($sql, undef, $term);
 }
-
-sub _docfreq_t {
-    my $self = shift;
-    my ($fno, $term) = @_;
-    my $sql = $self->db_docfreq_t($self->{INVERTED_TABLES}->[$fno]);
-    my ($docfreq_t) =
-	$self->{DBH}->selectrow_array($sql, undef, $term);
-    return $docfreq_t;
-}
-

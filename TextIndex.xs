@@ -798,6 +798,7 @@ PPCODE:
 	    while (tp_pos[j] = get_tp_vint(tp[j], tp_pos[j], &cur_tp_delta_n))
 	    {
 		cur_tp_idx[j]++;
+		if (cur_tp_delta_n == 0) break; /* FIXME: how does this condition occur? */
 		if (cur_tp_idx[j] < tp_idx[j] - freq_n + 1) continue;
 		positions[j][a] = cur_tp_delta_n;
 		a++;
@@ -907,7 +908,9 @@ PPCODE:
     if (! TEXTINDEX_DEREF_BITVEC(bitvec_ref, bitvec_obj, bitvec)) {
         TEXTINDEX_ERROR("arg3 must be Bit::Vector object");
     }
-
+    if (av_len(W_D) + 1 < res_max + 1) {
+        TEXTINDEX_ERROR("bad W_D data was passed or res_max less than zero");
+    }
     pos = 0;
     last_doc = 0;
     acc_size = 0;

@@ -10,7 +10,7 @@ if (defined $ENV{DBI_DSN}) {
     plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
 }
 
-my $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 0 });
+my $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 1 });
 
 ok( defined $dbh && $dbh->ping );
 

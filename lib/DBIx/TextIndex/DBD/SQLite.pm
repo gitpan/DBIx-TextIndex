@@ -1,4 +1,4 @@
-# MySQL module for DBIx::TextIndex
+# SQLite module for DBIx::TextIndex
 
 use strict;
 
@@ -24,21 +24,18 @@ END
 sub db_drop_table {
     my $self = shift;
     my $table = shift;
-    my $sql = <<END;
-drop table if exists $table
-END
-
-    $self->{INDEX_DBH}->do($sql);
+    if ($self->db_table_exists($table)) {
+	$self->{INDEX_DBH}->do("DROP TABLE $table");
+    }
 
 }
 
 sub db_table_exists {
     my $self = shift;
     my $table = shift;
-    # FIXME: $dbh->tables with no args marked deprecated in DBI docs
-    my @tables = $self->{INDEX_DBH}->tables;
+    my @tables = $self->{INDEX_DBH}->tables(undef, undef, $table, 'table');
     for (@tables) {
-	return 1 if m/^\`?$table\`?$/;
+	return 1 if m/^[\"\`]?$table[\"\`]?$/;
     }
     return 0;
 }
@@ -47,30 +44,29 @@ sub db_create_collection_table {
     my $self = shift;
     return <<END;
 CREATE TABLE collection (
-  collection varchar(30) NOT NULL default '',
-  version decimal(10,2) NOT NULL default '0.00',
-  max_indexed_id int(10) unsigned NOT NULL default '0',
+  collection varchar(30) PRIMARY KEY default '',
+  version numeric(10,2) NOT NULL default 0.00,
+  max_indexed_id int NOT NULL default 0,
   doc_table varchar(30) NOT NULL default '',
   doc_id_field varchar(30) NOT NULL default '',
   doc_fields varchar(250) NOT NULL default '',
   charset varchar(50) NOT NULL default '',
   stoplist varchar(255) NOT NULL default '',
-  proximity_index enum('0', '1') NOT NULL default '0',
+  proximity_index varchar(1) NOT NULL default '0',
   error_empty_query varchar(255) NOT NULL default '',
   error_quote_count varchar(255) NOT NULL default '',
   error_no_results varchar(255) NOT NULL default '',
   error_no_results_stop varchar(255) NOT NULL default '',
   error_wildcard_length varchar(255) NOT NULL default '',
   error_wildcard_expansion varchar(255) NOT NULL default '',
-  max_word_length int(10) unsigned NOT NULL default '0',
-  result_threshold int(10) unsigned NOT NULL default '0',
-  phrase_threshold int(10) unsigned NOT NULL default '0',
-  min_wildcard_length int(10) unsigned NOT NULL default '0',
-  max_wildcard_term_expansion int(10) unsigned NOT NULL default '0',
-  decode_html_entities enum('0', '1') NOT NULL default '0',
+  max_word_length int NOT NULL default 0,
+  result_threshold int NOT NULL default 0,
+  phrase_threshold int NOT NULL default 0,
+  min_wildcard_length int NOT NULL default 0,
+  max_wildcard_term_expansion int NOT NULL default 0,
+  decode_html_entities varchar(1) NOT NULL default '0',
   scoring_method varchar(20) NOT NULL default '',
-  update_commit_interval int(10) unsigned NOT NULL default '0',
-  PRIMARY KEY collection_key (collection)
+  update_commit_interval int NOT NULL default 0
 )
 END
 
@@ -336,6 +332,9 @@ END
 sub db_update_docweights_execute {
     my $self = shift;
     my ($sth, $fno, $avg_w_d, $packed_w_d) = @_;
+    $packed_w_d =~ s/\\/\\\\/g;
+    $packed_w_d =~ s/\0/\\0/g;
+
     $sth->execute($fno, $avg_w_d, $packed_w_d);
 }
 
@@ -392,10 +391,9 @@ sub db_create_mask_table {
 
     return <<END;
 create table $self->{MASK_TABLE} (
-  mask             varchar(100)            not null,
-  docs_vector mediumblob 	           not null,
-  primary key 	   mask_key (mask)
-)
+  mask             varchar(100) primary key,
+  docs_vector text 	           not null
+);
 END
 
 }
@@ -404,23 +402,20 @@ sub db_create_docweights_table {
     my $self = shift;
     return <<END;
 create table $self->{DOCWEIGHTS_TABLE} (
-  field_no 	   smallint unsigned 	   not null,
-  avg_docweight    float                   not null,
-  docweights 	   mediumblob 		   not null,
-  primary key 	   field_no_key (field_no)
+  field_no 	   integer 	   primary key,
+  avg_docweight    real           not null,
+  docweights 	   blob 	   not null
 )
 END
 }
-
 
 sub db_create_all_docs_vector_table {
     my $self = shift;
 
     return <<END;
 CREATE TABLE $self->{ALL_DOCS_VECTOR_TABLE} (
-  id               INT UNSIGNED            NOT NULL,
-  all_docs_vector  MEDIUMBLOB              NOT NULL,
-  UNIQUE KEY       id_key (id)
+  id               INT PRIMARY KEY,
+  all_docs_vector  text              NOT NULL
 )
 END
 }
@@ -432,11 +427,10 @@ sub db_create_inverted_table {
 
     return <<END;
 create table $table (
-  word             varchar($max_word)      not null,
-  docfreq_t 	   int unsigned 	   not null,
-  term_docs	   mediumblob 		   not null,
-  term_pos         longblob                not null,
-  PRIMARY KEY 	   word_key (word)
+  word             varchar($max_word)      primary key,
+  docfreq_t 	   int                     not null,
+  term_docs	   blob 		   not null,
+  term_pos         longblob                not null
 )
 END
 
@@ -454,4 +448,3 @@ END
 }
 
 1;
-

@@ -19,12 +19,11 @@ SYNOPSIS
              no_results => "your seach did not produce any results",
              no_results_stop => "no results, these words were stoplisted: "
          },
-         language => 'en', # cz or en
+         charset => 'iso-8859-1'.
          stoplist => [ 'en' ],
          max_word_length => 12,
-         result_threshold => 5000,
          phrase_threshold => 1000,
-         min_wildcard_length => 4,
+         min_wildcard_length => 1,
          decode_html_entities => 1,
          print_activity => 0
      });
@@ -50,11 +49,7 @@ DESCRIPTION
     DBIx::TextIndex was developed for doing full-text searches on BLOB
     columns stored in a database. Almost any database with BLOB and DBI
     support should work with minor adjustments to SQL statements in the
-    module.
-
-    Implements a crude parser for tokenizing a user input string into
-    phrases, can-include words, must-include words, and must-not-include
-    words.
+    module. MySQL, PostgreSQL, and SQLite are currently supported.
 
     Operates in case insensitive manner.
 
@@ -112,8 +107,7 @@ DESCRIPTION
 
     db  In past versions, the database driver name was passed in this
         argument. As of version 0.22, the driver name is read from the
-        database handle passed to index_dbh. Both MySQL (DBD::mysql) and
-        PostgreSQL (DBD::Pg) are supported.
+        database handle passed to index_dbh.
 
     errors
         This hash reference can be used to override default error messages.
@@ -138,9 +132,6 @@ DESCRIPTION
     max_word_length
         Specifies maximum word length resolution. Defaults to 20 characters.
 
-    result_threshold
-        Defaults to 5000 documents.
-
     phrase_threshold
         Defaults to 1000 documents.
 
@@ -162,10 +153,10 @@ DESCRIPTION
     creating new ones.
 
     initialize() also stores the doc_table, doc_fields, doc_id_field,
-    language, stoplist, error attributes, proximity_index, max_word_length,
-    result_threshold, phrase_threshold and min_wildcard_length preferences
-    in a special table called "collection," so subsequent calls to new() for
-    a given collection do not need those arguments.
+    char_set, stoplist, error attributes, proximity_index, max_word_length,
+    phrase_threshold and min_wildcard_length preferences in a special table
+    called "collection," so subsequent calls to new() for a given collection
+    do not need those arguments.
 
     Calling initialize() will upgrade the collection table created by
     earlier versions of DBIx::TextIndex if necessary.
@@ -342,22 +333,33 @@ SUPPORT FOR SEARCH MASKS
         Deletes a single mask from the mask table in the database.
 
 PARTIAL PATTERN MATCHING USING WILDCARDS
-        You can use wildcard characters "*" or "?" at end of a word to match
-        all words that begin with that word. Example:
+        You can use wildcard characters "*" or "?" at the end of or in the
+        middle of words
 
-            the "*" character means "match any characters"
+        Example:
 
-            car*        ==> matches "car", "cars", "careful", "cartel", ....
+            "*" matches zero or more characters
 
-            the "?" character means "match also the plural form"
+            car*        ==> "car", "cars", "careful", "cartel", ....
+            ca*r        ==> "car", "career", "caper", "cardiovascular"
 
-            car?        ==> matches only "car" or "cars"
+            "?" matches any single character
 
-        The option min_wildcard_length is used to set the minimum number or
-        characters appearing before the "*" wildcard character. The default
-        is four characters to avoid selection of excessive amounts of word
-        combinations. Unless this option is set to a lower value, the
-        example above (car*) wouldn't produce any results.
+            car?        ==> "care", "cars", "cart"
+            d?g         ==> "dig", "dog", "dug"
+
+            "+" at the end matches singular or plural form (naively, by
+                 appending an 's' to the word)
+
+            car+        ==> "car", "cars"
+
+        By default, at least 1 alphanumeric character must appear before the
+        first wildcard character. The option min_wildcard_length can changed
+        to require more alphanumeric characters before the first wildcard.
+
+        The option max_wildcard_term_expansion specifies the maximum number
+        of words a wildcard term can expand to before throwing a query
+        exception. The default is 30 words.
 
 HIGHLIGHTING OF QUERY WORDS OR PATTERNS IN RESULTING DOCUMENTS
         A module HTML::Highlight can be used either independently or
@@ -374,22 +376,6 @@ HIGHLIGHTING OF QUERY WORDS OR PATTERNS IN RESULTING DOCUMENTS
         Check example script 'html_search.cgi' in the 'examples/' directory
         of DBIx::TextIndex distribution or refer to the documentation of
         HTML::Highlight for more information.
-
-CZECH LANGUAGE SUPPORT
-        For czech diacritics insensitive operation you need to set the
-        language option to 'cz'.
-
-                my $index = DBIx::TextIndex->new({
-                        ....
-                        language => 'cz',
-                        ....
-                });
-
-        This option MUST be set for correct czech language proccessing.
-        Diacritics sensitive operation is not possible.
-
-        Requires the module "CzFast" that is available on CPAN in directory
-        of author "TRIPIE".
 
 AUTHOR
         Daniel Koch, dkoch@bizjournals.com.
@@ -442,6 +428,32 @@ SEE ALSO
 Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
+
+0.23
+
+    Added support for SQLite
+
+    Changed wildcard syntax slightly: a '?' character matches any
+    single character.  A '+' at the end of a word behaves like the '?'
+    character in previous versions, matching the singular or plural
+    forms of the word.
+
+    Wildcard characters '*' and '?' can now be used in the middle
+    of a query term, as well as at the end of a query term.
+
+    Added error messages error_wildcard_length and
+    error_wildcard_expansion, collection table will be upgraded
+
+    Added argument 'max_wildcard_term_expansion' to new().  This specifies
+    the maximum number of words a wildcard term can expand to before
+    throwing an exception.  The default is 30 words.   
+
+    Fixed incorrect results for Okapi-scored results with wildcard terms
+   
+    Fixed segfault if position index structure is corrupted
+
+    Fixed bug occurring when add_doc() is followed by search() on same
+    instance of $index
 
 0.22
 

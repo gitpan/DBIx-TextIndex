@@ -27,16 +27,16 @@ sub db_drop_table {
     my $self = shift;
     my $table = shift;
 
-	if( $self->{INDEX_DBH}->selectrow_array("SELECT tablename FROM pg_tables WHERE tablename = '$table'") ) {
-		$self->{INDEX_DBH}->do("DROP TABLE $table");
-	}
+    if( $self->{INDEX_DBH}->selectrow_array("SELECT tablename FROM pg_tables WHERE tablename = '$table'") ) {
+	$self->{INDEX_DBH}->do("DROP TABLE $table");
+    }
 }
 
 sub db_table_exists {
     my $self = shift;
     my $table = shift;
 
-	return 1 if $self->{INDEX_DBH}->selectrow_array("SELECT tablename FROM pg_tables WHERE tablename = '$table'");
+    return 1 if $self->{INDEX_DBH}->selectrow_array("SELECT tablename FROM pg_tables WHERE tablename = '$table'");
     return 0;
 }
 
@@ -57,10 +57,13 @@ CREATE TABLE collection (
   error_quote_count varchar(255) NOT NULL default '',
   error_no_results varchar(255) NOT NULL default '',
   error_no_results_stop varchar(255) NOT NULL default '',
+  error_wildcard_length varchar(255) NOT NULL default '',
+  error_wildcard_expansion varchar(255) NOT NULL default '',
   max_word_length int NOT NULL default 0,
   result_threshold int NOT NULL default 0,
   phrase_threshold int NOT NULL default 0,
   min_wildcard_length int NOT NULL default 0,
+  max_wildcard_term_expansion int NOT NULL default 0,
   decode_html_entities varchar(1) NOT NULL default '0',
   scoring_method varchar(20) NOT NULL default '',
   update_commit_interval int NOT NULL default 0

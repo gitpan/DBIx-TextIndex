@@ -12,7 +12,7 @@ if (defined $ENV{DBI_DSN}) {
 
 my $dbh;
 eval {
-    $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 0 });
+    $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 1 });
 };
 if ($@) {
     if (! $DBI::errstr) {

@@ -4,4 +4,4 @@ use strict;
 
 BEGIN { use_ok('DBIx::TextIndex') };
 
-is(DBIx::TextIndex->VERSION, '0.22');
+is(DBIx::TextIndex->VERSION, '0.23');

@@ -2,7 +2,7 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.22';
+our $VERSION = '0.23';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -13,6 +13,7 @@ use DBIx::TextIndex::Exception;
 use DBIx::TextIndex::QueryParser;
 use DBIx::TextIndex::TermDocsCache;
 use HTML::Entities ();
+
 my $unac;
 BEGIN {
     eval { require Text::Unaccent; import Text::Unaccent qw(unac_string) };
@@ -27,18 +28,21 @@ my $QRY = 'DBIx::TextIndex::Exception::Query';
 my $ME  = 'DBIx::TextIndex"';
 
 # Version number when collection table definition last changed
-my $LAST_COLLECTION_TABLE_UPGRADE = '0.17';
+my $LAST_COLLECTION_TABLE_UPGRADE = '0.23';
 
 # Largest size word to be indexed
 my $MAX_WORD_LENGTH = 20;
 
-# Minimum size of word base before a wildcard
-my $MIN_WILDCARD_LENGTH = 3;
+# Minimum number of alphanumeric characters in a term before a wildcard
+my $MIN_WILDCARD_LENGTH = 1;
+
+# Maximum number of words a wildcard term can expand to
+my $MAX_WILDCARD_TERM_EXPANSION = 30;
 
  # Used to screen stop words from the scoring process
 my $IDF_MIN_OKAPI        = -1.8;
 
-# What can be considered too many results
+# What can be considered too many results, NO LONGER USED
 my $RESULT_THRESHOLD = 5000;
 
 # Document score accumulator, higher numbers increase scoring accuracy
@@ -52,11 +56,21 @@ my $SEARCH_CACHE_FLUSH_INTERVAL = 1000;
 my $PHRASE_THRESHOLD = 1000;
 
 my %ERROR = (
-    empty_query     => "You must be searching for something!",
-    quote_count     => "Quotes must be used in matching pairs.",
-    no_results      => "Your search did not produce any matching documents.",
-    no_results_stop => "Your search did not produce any matching " .
+    empty_query        => "You must be searching for something!",
+    quote_count        => "Quotes must be used in matching pairs.",
+    no_results         => "Your search did not produce any matching documents.",
+    no_results_stop    => "Your search did not produce any matching " .
         "documents. These common words were not included in the search:",
+
+    wildcard_length    => $MIN_WILDCARD_LENGTH > 1
+	 ?
+	    "Use at least $MIN_WILDCARD_LENGTH letters or " .
+	    "numbers at the beginning of the word before wildcard characters."
+	 :
+	    "Use at least $MIN_WILDCARD_LENGTH letter or " .
+	    "number at the beginning of the word before wildcard characters.",
+    wildcard_expansion => "The wildcard term you used was too broad, " .
+	"please use more characters before or after the wildcard",
 	     );
 
 my $COLLECTION_TABLE = 'collection';
@@ -79,10 +93,13 @@ my @COLLECTION_FIELDS = qw(
     error_quote_count
     error_no_results
     error_no_results_stop
+    error_wildcard_length
+    error_wildcard_expansion
     max_word_length
     result_threshold
     phrase_threshold
     min_wildcard_length
+    max_wildcard_term_expansion
     decode_html_entities
     scoring_method
     update_commit_interval
@@ -102,10 +119,13 @@ my %COLLECTION_FIELD_DEFAULT = (
     error_empty_query => $ERROR{empty_query},
     error_no_results => $ERROR{no_results},
     error_no_results_stop => $ERROR{no_results_stop},
+    error_wildcard_length => $ERROR{wildcard_length},
+    error_wildcard_expansion => $ERROR{wildcard_expansion},
     max_word_length => $MAX_WORD_LENGTH,
     result_threshold => $RESULT_THRESHOLD,
     phrase_threshold => $PHRASE_THRESHOLD,
     min_wildcard_length => $MIN_WILDCARD_LENGTH,
+    max_wildcard_term_expansion => $MAX_WILDCARD_TERM_EXPANSION,
     decode_html_entities => '1',
     scoring_method => 'okapi',
     update_commit_interval => 20000,
@@ -144,7 +164,8 @@ sub new {
 
     $args->{dbd} = $self->{INDEX_DBH}->{Driver}->{Name};
     my $dbd = 'DBIx/TextIndex/DBD/' . $args->{dbd} . '.pm';
-    require "$dbd";
+    eval { require "$dbd" };
+    die "Unsupported DBD driver: $dbd ($@)" if $@;
 
     $self->{DBD} = $args->{dbd};
 
@@ -152,31 +173,28 @@ sub new {
 	$self->{DOC_TABLE} = $args->{doc_table};
 	$self->{DOC_FIELDS} = $args->{doc_fields};
 	$self->{DOC_ID_FIELD} = $args->{doc_id_field};
-	$self->{CHARSET} = $args->{charset} || $CHARSET_DEFAULT;
     	$self->{STOPLIST} = $args->{stoplist};
-    	$self->{PROXIMITY_INDEX} = defined $args->{proximity_index} ?
-	    $args->{proximity_index} :
-	    $COLLECTION_FIELD_DEFAULT{proximity_index};
-	# overiding default error messages
+
+	# override default error messages
 	while (my($error, $msg) = each %{$args->{errors}}) {
 	    $ERROR{$error} = $msg;
 	}
-	$self->{MAX_WORD_LENGTH} = $args->{max_word_length}
-	    || $MAX_WORD_LENGTH;
-	$self->{RESULT_THRESHOLD} = $args->{result_threshold}
-	    || $RESULT_THRESHOLD;
-	$self->{PHRASE_THRESHOLD} = $args->{phrase_threshold}
-	    || $PHRASE_THRESHOLD;
-	$self->{MIN_WILDCARD_LENGTH} = $args->{min_wildcard_length}
-	    || $MIN_WILDCARD_LENGTH;
-	$self->{DECODE_HTML_ENTITIES} = $args->{decode_html_entities}
-	    || 1;
-	$self->{SCORING_METHOD} = $args->{scoring_method}
-	    || $COLLECTION_FIELD_DEFAULT{scoring_method};
-	$self->{UPDATE_COMMIT_INTERVAL} =
-	    defined $args->{update_commit_interval} ?
-	    $args->{update_commit_interval} :
-	    $COLLECTION_FIELD_DEFAULT{update_commit_interval};
+
+	foreach my $field ( qw(max_word_length
+			       result_threshold
+			       phrase_threshold
+			       min_wildcard_length
+			       max_wildcard_term_expansion
+			       decode_html_entities
+			       scoring_method
+			       update_commit_interval
+			       charset
+			       proximity_index) )
+	{
+	    $self->{uc($field)} = defined $args->{$field} ?
+		$args->{$field} :
+		$COLLECTION_FIELD_DEFAULT{$field};
+	}
     }
     $self->{CZECH_LANGUAGE} = $self->{CHARSET} eq 'iso-8859-2' ? 1 : 0;
     $self->{MASK_TABLE} = $coll . '_mask';
@@ -204,8 +222,9 @@ sub new {
             	$self->{STOPLISTED_WORDS}->{$word} = 1;
             }
         }
-        $self->{STOPLISTED_QUERY} = [];
     }
+    $self->{STOPLISTED_QUERY} = [];
+
 
     # Cache for term_doc postings
     $self->{C} = DBIx::TextIndex::TermDocsCache->new({
@@ -219,7 +238,6 @@ sub new {
 
     # Number of searches performed on this instance
     $self->{SEARCH_COUNT} = 0;
-
     return $self;
 }
 
@@ -291,7 +309,6 @@ sub add_doc {
 	    my @terms = $self->_words($self->_fetch_doc($doc_id,
 				      $self->{DOC_FIELDS}->[$fno]));
 
-
 	    # word count
 	    my $wc = 1;
 	    foreach my $term (@terms) {
@@ -330,9 +347,7 @@ sub add_doc {
     $self->max_indexed_id($sort_ids[-1]);
     $self->all_doc_ids(@added_ids);
     $self->_commit_docs;
-
     return $add_count;
-
 }
 
 # Stub method for older deprecated name
@@ -410,12 +425,15 @@ sub _docweights_remove {
 	    $packed_w_d
 	);
     }
+    $sth->finish;
 }
 
 sub _inverted_remove {
     my $self = shift;
     my $docs_ref = shift;
     my $words = shift;
+
+    $self->{INDEX_DBH}->begin_work;
 
     my @docs = @{$docs_ref};
     foreach my $fno (0..$#{$self->{DOC_FIELDS}}) {
@@ -426,15 +444,23 @@ sub _inverted_remove {
 	$sql = $self->db_inverted_replace($table);
 	my $i_sth = $self->{INDEX_DBH}->prepare($sql);
 
-	$sql = $self->db_inverted_select($table);
-	my $s_sth = $self->{INDEX_DBH}->prepare($sql);
+	my $s_sth;
+	unless ($self->{DBD} eq 'SQLite') {
+	    $sql = $self->db_inverted_select($table);
+	    $s_sth = $self->{INDEX_DBH}->prepare($sql);
+	}
 
 	foreach my $word (keys %{$words->[$fno]}) {
-            $s_sth->execute($word);
+
 	    my ($o_docfreq_t, $o_term_docs, $o_term_pos);
 
+	    $s_sth = $self->{INDEX_DBH}->prepare(
+	                 $self->db_inverted_select($table))
+		if $self->{DBD} eq 'SQLite';
+            $s_sth->execute($word);
 	    $s_sth->bind_columns(\$o_docfreq_t, \$o_term_docs, \$o_term_pos);
 	    $s_sth->fetch;
+	    $s_sth->finish if $self->{DBD} eq 'SQLite';
 
 	    print "inverted_remove: field: $field: word: $word\n" if $PA;
 	    # @docs_all contains a doc id for each word that
@@ -472,6 +498,7 @@ sub _inverted_remove {
 	    );
 	}
     }
+    $self->{INDEX_DBH}->commit;
 }
 
 sub stat {
@@ -532,6 +559,7 @@ sub search {
 	}
 	push @query_field_nos, $self->{FIELD_NO}->{$field};
     }
+
     throw $QRY( error => $ERROR{'empty_query'} ) unless $#query_field_nos >= 0;
     @{$self->{QUERY_FIELD_NOS}} = sort { $a <=> $b } @query_field_nos;
     @{$self->{TERM_FIELD_NOS}} = sort { $a <=> $b } keys %term_field_nos;
@@ -561,7 +589,6 @@ sub search {
 	    }
 	}
     }
-
 
     $self->_optimize_or_search;
     $self->_resolve_mask;
@@ -638,6 +665,7 @@ sub _boolean_search_field {
 
     foreach my $clause (@$clauses) {
 	my $clause_vec;
+	my $expanded_terms = [];
 	my $fno = $field_no;
 	if (exists $self->{FIELD_NO}->{$clause->{FIELD}}) {
 	    $fno = $self->{FIELD_NO}->{$clause->{FIELD}};
@@ -646,9 +674,11 @@ sub _boolean_search_field {
 	    $clause_vec =
 		$self->_boolean_search_field($fno, $clause->{QUERY});
 	} elsif ($clause->{TYPE} eq 'PLURAL') {
-	    $clause_vec = $self->_resolve_plural($fno, $clause->{TERM});
+	    ($clause_vec, $expanded_terms) =
+		$self->_resolve_plural($fno, $clause->{TERM});
 	} elsif ($clause->{TYPE} eq 'WILD') {
-	    $clause_vec = $self->_resolve_wild($fno, $clause->{TERM});
+	    ($clause_vec, $expanded_terms) =
+		$self->_resolve_wild($fno, $clause->{TERM});
 	} elsif ($clause->{TYPE} eq 'PHRASE'
 		 || $clause->{TYPE} eq 'IMPLICITPHRASE') {
 	    $clause_vec = $self->_resolve_phrase($fno, $clause);
@@ -665,6 +695,9 @@ sub _boolean_search_field {
 		foreach my $term_clause (@{$clause->{PHRASETERMS}}) {
 		    push @{$self->{TERMS}->[$fno]}, $term_clause->{TERM};
 		}
+	    } elsif ($clause->{TYPE} eq 'WILD' ||
+		     $clause->{TYPE} eq 'PLURAL') {
+		push @{$self->{TERMS}->[$fno]}, @$expanded_terms;
 	    } else {
 		push @{$self->{TERMS}->[$fno]}, $clause->{TERM};
 	    }
@@ -849,18 +882,25 @@ sub _resolve_plural {
     # FIXME: need to do a real merge
     $self->{TERM_DOCS}->[$fno]->{$term} = $self->{C}->term_docs($fno, $max_t);
 
-    return $terms_union;
+    return $terms_union, [$term, $term.'s'];
 }
 
 sub _resolve_wild {
     my $self = shift;
     my ($fno, $term) = @_;
     my $maxid = $self->max_indexed_id + 1;
-    # FIXME: should we throw an exception? Returning empty vector for now
-    return Bit::Vector->new($maxid)
-	if length($term) < $self->{MIN_WILDCARD_LENGTH};
+    my $prefix = (split(/[\*\?]/, $term))[0];
+    throw $QRY( error => $ERROR{wildcard_length} )    
+	if length($prefix) < $self->{MIN_WILDCARD_LENGTH};
     my $sql = $self->db_fetch_words($self->{INVERTED_TABLES}->[$fno]);
-    my $terms = $self->{INDEX_DBH}->selectcol_arrayref($sql, undef, "$term%");
+    my $terms = [];
+    my $sql_term = $term;
+    $sql_term =~ tr/\*\?/%_/;
+    $terms = $self->{INDEX_DBH}->selectcol_arrayref($sql, undef, $sql_term);
+    # To save resources, check to make sure wildcard search is not too broad
+    throw $QRY( error => $ERROR{wildcard_expansion} )
+	if $#$terms + 1 > $self->{MAX_WILDCARD_TERM_EXPANSION};
+
     my $terms_union = Bit::Vector->new($maxid);
     my $count = 0;
     my $sum_f_t;
@@ -879,26 +919,31 @@ sub _resolve_wild {
     if ($count) {
 	$self->{F_T}->[$fno]->{$term} = int($sum_f_t/$count);
 	# FIXME: need to do a real merge
-	$self->{TERM_DOCS}->[$fno]->{$term} = $self->{C}->term_docs($fno, $max_t);
+#	$self->{TERM_DOCS}->[$fno]->{$term} = $self->{C}->term_docs($fno, $max_t);
     }
     # FIXME: what should TERM_DOCS contain if count is 0?
-    return $terms_union;
+    return ($terms_union, $terms);
 }
 
 sub _flush_cache {
     my $self = shift;
-    # flush masks every time
-    delete($self->{RESULT_VECTOR});
-    delete($self->{RESULT_MASK});
-    delete($self->{VALID_MASK});
-    delete($self->{MASK});
-    delete($self->{MASK_FETCH_LIST});
-    delete($self->{MASK_VECTOR});
-    delete($self->{TERMS});
-    delete($self->{F_QT});
-    delete($self->{F_T});
-    delete($self->{TERM_DOCS});
-    delete($self->{TERM_POS});
+
+    foreach my $field (qw(result_vector
+			  result_mask
+			  valid_mask
+			  mask
+			  mask_fetch_list
+			  mask_vector
+			  terms
+			  f_qt
+			  f_t
+			  term_docs
+    			  term_pos))
+    {
+	delete($self->{uc $field});
+    }
+
+    $self->{STOPLISTED_QUERY} = [];
     # check to see if documents have been added since we last called new()
     my $new_max_indexed_id = $self->fetch_max_indexed_id;
     if (($new_max_indexed_id != $self->{MAX_INDEXED_ID})
@@ -953,10 +998,10 @@ sub initialize {
 sub max_indexed_id {
 
     my $self = shift;
-
     my $max_indexed_id = shift;
     if (defined $max_indexed_id) {
 	$self->_update_collection_info('max_indexed_id', $max_indexed_id);
+	$self->{C}->max_indexed_id($max_indexed_id);
 	return $self->{MAX_INDEXED_ID};
     } else {
 	return $self->{MAX_INDEXED_ID};
@@ -1149,11 +1194,14 @@ sub _store_collection_info {
 			   $ERROR{quote_count},
 			   $ERROR{no_results},
 			   $ERROR{no_results_stop},
+			   $ERROR{wildcard_length},
+			   $ERROR{wildcard_expansion},
 
 			   $self->{MAX_WORD_LENGTH},
 			   $self->{RESULT_THRESHOLD},
 			   $self->{PHRASE_THRESHOLD},
 			   $self->{MIN_WILDCARD_LENGTH},
+			   $self->{MAX_WILDCARD_TERM_EXPANSION},
 
 			   $self->{DECODE_HTML_ENTITIES},
 			   $self->{SCORING_METHOD},
@@ -1175,22 +1223,18 @@ sub _fetch_collection_info {
 	return 0;
     }
     
-    my $fetch_status = 0;
-
     my $sql = $self->db_fetch_collection_info;
 
     my $sth = $self->{INDEX_DBH}->prepare($sql);
 
     $sth->execute($self->{COLLECTION});
 
-    $fetch_status = 1 if $sth->rows;
-
     my $doc_fields = '';
     my $stoplists = '';
 
-    my $null;
+    my $collection;
     $sth->bind_columns(\(
-		       $null,
+		       $collection,
 		       $self->{VERSION},
 		       $self->{MAX_INDEXED_ID},
 		       $self->{DOC_TABLE},
@@ -1205,11 +1249,14 @@ sub _fetch_collection_info {
 		       $ERROR{quote_count},
 		       $ERROR{no_results},
 		       $ERROR{no_results_stop},
+		       $ERROR{wildcard_length},
+		       $ERROR{wildcard_expansion},
 
 		       $self->{MAX_WORD_LENGTH},
 		       $self->{RESULT_THRESHOLD},
 		       $self->{PHRASE_THRESHOLD},
 		       $self->{MIN_WILDCARD_LENGTH},
+		       $self->{MAX_WILDCARD_TERM_EXPANSION},
 
 		       $self->{DECODE_HTML_ENTITIES},
 		       $self->{SCORING_METHOD},
@@ -1228,7 +1275,7 @@ sub _fetch_collection_info {
     $self->{CHARSET} = $self->{CHARSET} || $CHARSET_DEFAULT;
     $self->{CZECH_LANGUAGE} = $self->{CHARSET} eq 'iso-8859-2' ? 1 : 0;
 
-    return $fetch_status;
+    return $collection ? 1 : 0;
 
 }
 
@@ -1302,10 +1349,16 @@ sub _fetch_docweights {
 
 	while (my $row = $sth->fetchrow_arrayref) {
 	    $self->{AVG_W_D}->[$row->[0]] = $row->[1];
-	    $self->{W_D}->[$row->[0]] = [ unpack('f*', $row->[2]) ];
+	    # Ugly, DBD::SQLite doesn't quote \0 when using placeholders
+	    if ($self->{DBD} eq 'SQLite') {
+		my $packed_w_d = $row->[2];
+		$packed_w_d =~ s/\\0/\0/g;
+		$packed_w_d =~ s/\\\\/\\/g;
+		$self->{W_D}->[$row->[0]] = [ unpack('f*', $packed_w_d) ];
+	    } else {
+		$self->{W_D}->[$row->[0]] = [ unpack('f*', $row->[2]) ];
+	    }
 	}
-
-	$sth->finish;
     }
 }
 
@@ -1339,13 +1392,17 @@ sub _search_okapi {
     my $result_max = $self->{RESULT_VECTOR}->Max;
     my $result_min = $self->{RESULT_VECTOR}->Min;
 
+    if ($result_max < 1) {
+	throw $QRY( error => $ERROR{no_results} );
+    }
+
     foreach my $fno ( @{$self->{TERM_FIELD_NOS}} ) {
 	$avg_W_d = $self->{AVG_W_D}->[$fno];
 	foreach my $term (@{$self->{TERMS}->[$fno]}) {
 	    $f_t = $self->{F_T}->[$fno]->{$term} ||
 		$self->{C}->f_t($fno, $term);
 	    $idf =  log(($N - $f_t + 0.5) / ($f_t + 0.5));
-	    next if $idf < $IDF_MIN_OKAPI;
+	    next if $idf < $IDF_MIN_OKAPI; # FIXME: do we want do warn that term was stoplisted?
 	    $f_qt = $self->{F_QT}->[$fno]->{$term};     # freq of term in query
 	    my $w_qt = (($k3 + 1) * $f_qt) / ($k3 + $f_qt); # query term weight
 	    my $term_docs = $self->{TERM_DOCS}->[$fno]->{$term} ||
@@ -1575,7 +1632,6 @@ sub _positions {
     }
 }
 
-
 sub _commit_docs {
     my $self = shift;
 
@@ -1586,6 +1642,8 @@ sub _commit_docs {
     print "Storing doc weights\n" if $PA;
 
     $self->_fetch_docweights(1);
+
+    $self->{INDEX_DBH}->begin_work;
 
     $sth = $self->{INDEX_DBH}->prepare($self->db_update_docweights);
 
@@ -1606,10 +1664,17 @@ sub _commit_docs {
 	# FIXME: use actual doc count instead of max_indexed_id
 	my $avg_w_d = $sum / $id_b; 
 	$w_d[0] = 0 unless defined $w_d[0];
-	# FIXME: this takes too much space
+	# FIXME: this takes too much space, use a float compression method
 	my $packed_w_d = pack 'f*', @w_d;
-	$self->db_update_docweights_execute($sth, $fno, $avg_w_d, $packed_w_d) 
+	$self->db_update_docweights_execute($sth, $fno, $avg_w_d, $packed_w_d);
+	# Set AVG_W_D and W_D cached values to new value, in case same 
+	# instance is used for search immediately after adding to index
+	$self->{AVG_W_D}->[$fno] = $avg_w_d;
+	$self->{W_D}->[$fno] = \@w_d;
     }
+
+    $sth->finish;
+
     # Delete temporary in-memory structure
     delete($self->{NEW_W_D});
 
@@ -1619,8 +1684,14 @@ sub _commit_docs {
 
 	print("field$fno ", scalar keys %{$self->{TERM_DOCS_VINT}->[$fno]}, " distinct words\n") if $PA;
 
+	my $s_sth;
+
+	# SQLite chokes with "database table is locked" unless s_sth
+	# is finished before i_sth->execute
+	unless ($self->{DBD} eq 'SQLite') {
+	    $s_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_select($self->{INVERTED_TABLES}->[$fno]) );
+	}
 	my $i_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_replace($self->{INVERTED_TABLES}->[$fno]) );
-	my $s_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_select($self->{INVERTED_TABLES}->[$fno]) );
 
 	my $wc = 0;
 	while (my ($term, $term_docs_vint) = each %{$self->{TERM_DOCS_VINT}->[$fno]}) {
@@ -1633,10 +1704,11 @@ sub _commit_docs {
 	    my $o_term_docs = '';
 	    my $o_term_pos = '';
 
+	    $s_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_select($self->{INVERTED_TABLES}->[$fno]) ) if $self->{DBD} eq 'SQLite';
 	    $s_sth->execute($term);
 	    $s_sth->bind_columns(\$o_docfreq_t, \$o_term_docs, \$o_term_pos);
 	    $s_sth->fetch;
-
+	    $s_sth->finish if $self->{DBD} eq 'SQLite';
 	    my $term_docs = pack_term_docs_append_vint($o_term_docs, $term_docs_vint);
 
 	    my $term_pos = $o_term_pos . $self->{TERM_POS}->[$fno]->{$term};
@@ -1659,6 +1731,9 @@ sub _commit_docs {
 	delete($self->{TERM_POS}->[$fno]);
 	delete($self->{DOCFREQ_T}->[$fno]);
     }
+
+    $self->{INDEX_DBH}->commit;
+
 }
 
 sub _all_doc_ids_remove {
@@ -1762,11 +1837,10 @@ sub _words {
 sub _ping_doc {
     my $self = shift;
     my $id = shift;
-
+    my $found_doc = 0;
     my $sql = $self->db_ping_doc;
-    my $sth = $self->{DOC_DBH}->prepare($sql);
-    $sth->execute($id);
-    return $sth->rows;
+    ($found_doc) = $self->{DOC_DBH}->selectrow_array($sql, undef, $id);
+    return $found_doc;
 }
 
 sub _create_tables {
@@ -1793,7 +1867,7 @@ sub _create_tables {
 
     # docs vector table
 
-    print "Dropping docs vector table ($self->{ALL_DOC_VECTOR_TABLE})\n"
+    print "Dropping docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n"
 	if $PA;
     $self->db_drop_table($self->{ALL_DOCS_VECTOR_TABLE});
 
@@ -1852,12 +1926,11 @@ DBIx::TextIndex - Perl extension for full-text searching in SQL databases
     	 no_results => "your seach did not produce any results",
     	 no_results_stop => "no results, these words were stoplisted: "
      },
-     language => 'en', # cz or en
+     charset => 'iso-8859-1'.
      stoplist => [ 'en' ],
      max_word_length => 12,
-     result_threshold => 5000,
      phrase_threshold => 1000,
-     min_wildcard_length => 4,
+     min_wildcard_length => 1,
      decode_html_entities => 1,
      print_activity => 0
  });
@@ -1884,11 +1957,7 @@ DBIx::TextIndex - Perl extension for full-text searching in SQL databases
 DBIx::TextIndex was developed for doing full-text searches on BLOB
 columns stored in a database.  Almost any database with BLOB and DBI
 support should work with minor adjustments to SQL statements in the
-module.
-
-Implements a crude parser for tokenizing a user input string into
-phrases, can-include words, must-include words, and must-not-include
-words.
+module.  MySQL, PostgreSQL, and SQLite are currently supported.
 
 Operates in case insensitive manner.
 
@@ -1958,8 +2027,7 @@ The proximity matches work only forwards, not backwards, that means:
 
 In past versions, the database driver name was passed in this argument.
 As of version 0.22, the driver name is read from the database handle
-passed to index_dbh.  Both MySQL (DBD::mysql) and PostgreSQL (DBD::Pg) are
-supported.
+passed to index_dbh.
 
 =item errors
 
@@ -1988,10 +2056,6 @@ lower case.  Currently only two stoplists exist:
 
 Specifies maximum word length resolution. Defaults to 20 characters.
 
-=item result_threshold
-
-Defaults to 5000 documents.
-
 =item phrase_threshold
 
 Defaults to 1000 documents.
@@ -2019,8 +2083,8 @@ once when creating a new index! It drops all the inverted tables
 before creating new ones.
 
 initialize() also stores the doc_table, doc_fields,
-doc_id_field, language, stoplist, error attributes,
-proximity_index, max_word_length, result_threshold, phrase_threshold
+doc_id_field, char_set, stoplist, error attributes,
+proximity_index, max_word_length, phrase_threshold
 and min_wildcard_length preferences in a special table called
 "collection," so subsequent calls to new() for a given collection do
 not need those arguments.
@@ -2218,23 +2282,33 @@ Deletes a single mask from the mask table in the database.
 
 =head1 PARTIAL PATTERN MATCHING USING WILDCARDS
 
-You can use wildcard characters "*" or "?" at end of a word
-to match all words that begin with that word. Example:
+You can use wildcard characters "*" or "?" at the end of or in the middle
+of words
 
-    the "*" character means "match any characters"
+Example:
 
-    car*	==> matches "car", "cars", "careful", "cartel", ....
+    "*" matches zero or more characters
 
+    car*	==> "car", "cars", "careful", "cartel", ....
+    ca*r        ==> "car", "career", "caper", "cardiovascular"
 
-    the "?" character means "match also the plural form"
+    "?" matches any single character
 
-    car?	==> matches only "car" or "cars"
+    car?        ==> "care", "cars", "cart"
+    d?g         ==> "dig", "dog", "dug"
 
-The option B<min_wildcard_length> is used to set the minimum number
-or characters appearing before the "*" wildcard character.
-The default is four characters to avoid selection of excessive amounts
-of word combinations.  Unless this option is set to a lower value, the
-example above (car*) wouldn't produce any results.
+    "+" at the end matches singular or plural form (naively, by
+         appending an 's' to the word)
+
+    car+	==> "car", "cars"
+
+By default, at least 1 alphanumeric character must appear before the 
+first wildcard character.  The option B<min_wildcard_length> can changed
+to require more alphanumeric characters before the first wildcard.
+
+The option B<max_wildcard_term_expansion> specifies the maximum number of
+words a wildcard term can expand to before throwing a query exception. 
+The default is 30 words.   
 
 =head1 HIGHLIGHTING OF QUERY WORDS OR PATTERNS IN RESULTING DOCUMENTS
 
@@ -2252,23 +2326,6 @@ html_highlight().
 Check example script 'html_search.cgi' in the 'examples/' directory of
 DBIx::TextIndex distribution or refer to the documentation of HTML::Highlight
 for more information.
-
-=head1 CZECH LANGUAGE SUPPORT
-
-For czech diacritics insensitive operation you need to set the
-B<language> option to 'cz'.
-
-	my $index = DBIx::TextIndex->new({
-		....
-		language => 'cz',
-		....
-	});
-
-This option MUST be set for correct czech language proccessing.
-Diacritics sensitive operation is not possible.
-
-B<Requires the module "CzFast" that is available on CPAN in directory
-of author "TRIPIE".>
 
 =head1 AUTHOR
 

@@ -2,6 +2,32 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.23
+
+    Added support for SQLite
+
+    Changed wildcard syntax slightly: a '?' character matches any
+    single character.  A '+' at the end of a word behaves like the '?'
+    character in previous versions, matching the singular or plural
+    forms of the word.
+
+    Wildcard characters '*' and '?' can now be used in the middle
+    of a query term, as well as at the end of a query term.
+
+    Added error messages error_wildcard_length and
+    error_wildcard_expansion, collection table will be upgraded
+
+    Added argument 'max_wildcard_term_expansion' to new().  This specifies
+    the maximum number of words a wildcard term can expand to before
+    throwing an exception.  The default is 30 words.   
+
+    Fixed incorrect results for Okapi-scored results with wildcard terms
+   
+    Fixed segfault if position index structure is corrupted
+
+    Fixed bug occurring when add_doc() is followed by search() on same
+    instance of $index
+
 0.22
 
     WARNING: indexes must be recreated from scratch.

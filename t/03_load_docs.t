@@ -12,29 +12,35 @@ if (defined $ENV{DBI_DSN}) {
     plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
 }
 
-my $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 0 });
+my $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 1 });
 
 ok( defined $dbh && $dbh->ping );
 
 my $dbd = $dbh->{Driver}->{Name};
 
-if ($dbd eq 'mysql') {
-    ok( defined($dbh->do('DROP TABLE IF EXISTS textindex_doc')) );
-    ok( defined($dbh->do(<<END) ) );
-CREATE TABLE textindex_doc(
-doc_id INT UNSIGNED NOT NULL,
-doc TEXT,
-PRIMARY KEY (doc_id))
-END
-} else {
-    ok( defined($dbh->do('DROP TABLE textindex_doc')) );
+if ($dbd eq 'mysql' or $dbd eq 'SQLite' or $dbd eq 'Pg') {
+    my @tables = $dbh->tables(undef, undef, 'textindex_doc', 'table');
+    my $table_exists = 0;
+    foreach my $table (@tables) {
+	if ($table =~ m/^[\"\`]?textindex_doc[\"\`]?$/) {
+	    $table_exists = 1;
+	    last;
+	}
+    }
+    if ($table_exists) {
+        ok( defined($dbh->do('DROP TABLE textindex_doc')) );
+    } else {
+	ok(1);
+    }
     ok( defined($dbh->do(<<END) ) );
 CREATE TABLE textindex_doc(
 doc_id INT NOT NULL PRIMARY KEY,
 doc TEXT)
 END
-}
 
+} else {
+    print "Bail out! Unsupported DBD driver: $dbd\n";
+}
 
 {
     local $/ ="\n\n";

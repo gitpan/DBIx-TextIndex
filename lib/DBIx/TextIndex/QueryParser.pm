@@ -95,21 +95,24 @@ sub _parse {
 	    } else {
 		$clause->{PROXIMITY} = 1;
 	    }
-	} elsif ($q =~ s/^(\S+[\-\&\.\@\'\*]\S+)//) {
+	} elsif ($q =~ s/^(\S+(?:[\+\-\&\.\@\']|\\\*)\S+)//) {
 	    $clause->{TYPE} = 'IMPLICITPHRASE';
 	    $term = $1;
+	    $term =~ s:\\\*:\*:g;
 	    $clause->{PHRASETERMS} =
-	     $self->_parse(join(' ', split('[\-\&\.\@\'\*]',$term)));
-	} elsif ($q =~ s/^(\S+)\?//) {
+	     $self->_parse(join(' ', split('[\+\-\&\.\@\'\*]',$term))); # FIXME: check for double characters, which would cause empty phrase terms
+	} elsif ($q =~ s/^(\S+)\+//) {
 	    $clause->{TYPE} = 'PLURAL';
-	    $term = $1;
-	} elsif ($q =~ s/^(\S+)\*\s*//) {
-	    $clause->{TYPE} = 'WILD';
 	    $term = $1;
 	} else {
 	    $q =~ s/(\S+)//;
-	    $clause->{TYPE} = 'TERM';
-	    $term = $1;
+	    my $t = $1;
+	    if ($t =~ m/[\?\*]/) {
+		$clause->{TYPE} = 'WILD';
+	    } else {
+		$clause->{TYPE} = 'TERM';
+	    }
+	    $term = $t;
 	}
 	$clause->{TERM} = $self->_lc_and_unac($term) if $term;
 	if ($clause->{TERM}) {
