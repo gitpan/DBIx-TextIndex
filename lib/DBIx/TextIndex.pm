@@ -2,16 +2,16 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.13';
+our $VERSION = '0.14';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
 
 use Bit::Vector ();
 use Carp qw(carp croak);
-use Data::Dumper;
 use HTML::Entities ();
 use Text::Unaccent qw(unac_string);
+
 
 use Exception::Class (
   'DBIx::TextIndex::Exception',
@@ -495,9 +495,7 @@ sub search {
     throw $QRY( error => $ERROR{empty_query}) unless $query;
 
     my @field_nos;
-    require Data::Dumper;
-    print Data::Dumper::Dumper($self->{FIELD_NO});
-    print "\n";
+
     foreach my $field (keys %$query) {
 	throw $GEN( error => "invalid field ($field) in search()" )
 	    unless exists $self->{FIELD_NO}->{$field};
@@ -1636,9 +1634,7 @@ sub _docs {
 
     local $^W = 0; # turn off uninitialized value warning
     if (@_) {
-	my @doc_and_freq = @_;
-	$self->{TERM_DOCS_VINT}->[$field_no]->{$word} .=
-	    pack_vint(\@doc_and_freq), 
+	$self->{TERM_DOCS_VINT}->[$field_no]->{$word} .= pack 'w*', @_;
 	$self->{DOCFREQ_T}->[$field_no]->{$word}++; 
     } else {
 	term_docs_hashref($self->_fetch_docs($field_no, $word));
@@ -1687,7 +1683,6 @@ sub _fetch_docs_vector {
 }
 
 sub _commit_docs {
-
     my $self = shift;
 
     print "Storing max term frequency for each doc\n" if $PA;
@@ -1717,31 +1712,32 @@ sub _commit_docs {
 
     foreach my $field_no ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 
-	my $sql = $self->db_inverted_replace($self->{INVERTED_TABLES}->[$field_no]);
-	my $i_sth = $self->{INDEX_DBH}->prepare($sql);
+	print("field$field_no ", scalar keys %{$self->{TERM_DOCS_VINT}->[$field_no]}, " distinct words\n") if $PA;
 
-	print("field$field_no ", scalar keys %{$self->{TERM_DOCS_VINT}->[$field_no]},
-	       " distinct words\n") if $PA;
+	my $i_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_replace($self->{INVERTED_TABLES}->[$field_no]) );
 
-	while (my ($word, $term_docs_vbyte) = each %{$self->{TERM_DOCS_VINT}->[$field_no]}) {
+	my $s_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_select($self->{INVERTED_TABLES}->[$field_no]) );
+
+	my $wc = 0;
+	while (my ($word, $term_docs_vint) = each %{$self->{TERM_DOCS_VINT}->[$field_no]}) {
+
 	    print "$word\n" if $PA >= 2;
-
-	    my $sql = $self->db_inverted_select($self->{INVERTED_TABLES}->[$field_no]);
-	    my $s_sth = $self->{INDEX_DBH}->prepare($sql);
-
-	    $s_sth->execute($word);
-
+	    if ($PA && $wc > 0) {
+		print "committed $wc words\n" if $wc % 500 == 0;
+	    }
+	    
 	    my $o_docfreq_t = 0;
 	    my $o_docs_vector = '';
 	    my $o_term_docs = '';
 
+	    $s_sth->execute($word);
+
 	    $s_sth->bind_columns(\$o_docfreq_t, \$o_docs_vector,
-	    	\$o_term_docs);
+	        \$o_term_docs);
 
 	    $s_sth->fetch;
-	    $s_sth->finish;
 
-	    my @term_docs = unpack 'w*', $term_docs_vbyte;
+	    my @term_docs = unpack 'w*', $term_docs_vint;
 
 	    my %term_docs_hash = @term_docs;
 
@@ -1760,16 +1756,14 @@ sub _commit_docs {
 	    $i_sth->execute($word,
 			    ($self->{DOCFREQ_T}->[$field_no]->{$word} + $o_docfreq_t),
 			    $vector->to_Enum,
-			    pack_term_docs( [ @$old_term_docs, @term_docs] )
+			    pack_term_docs( [ @$old_term_docs, @term_docs ] ),
 			    ) or warn $self->{INDEX_DBH}->err;
-
+	    $wc++;
 	}
+	print "committed $wc words\n" if $PA && $wc > 0;
 	# Flush temporary hashes after data is stored
 	delete($self->{TERM_DOCS_VINT}->[$field_no]);
 	delete($self->{DOCFREQ_T}->[$field_no]);
-
-	$i_sth->finish;
-
     }
 }
 

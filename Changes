@@ -2,6 +2,9 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.14
+    Fixed memory leak in integer decoding
+
 0.13
     Changed format for inverted list postings to compressed binary
     format.  Index sizes should be 50% smaller than with previous versions.

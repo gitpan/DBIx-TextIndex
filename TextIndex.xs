@@ -4,6 +4,8 @@
 
 #include "ppport.h"
 
+#define TEXTINDEX_ERROR(error) \
+    croak("DBIx::TextIndex::%s(): %s", GvNAME(CvGV(cv)), error);
 
 MODULE = DBIx::TextIndex		PACKAGE = DBIx::TextIndex
 
@@ -23,10 +25,10 @@ PPCODE:
 
     string = SvPV(packed, len);
     length = len;
-    freqs = (HV *)sv_2mortal((SV *)newHV());
+    freqs = newHV();
     /* last byte cannot have high bit set */
     if (*(string + length) & 0x80)
-        croak("DBIx::TextIndex::%s(): %s", GvNAME(CvGV(cv)), "unterminated compressed integer");
+        TEXTINDEX_ERROR("unterminated compressed integer");
     while (length > 0) {
 	value = *string++; length--;
 	if (value & 0x80)
@@ -51,9 +53,8 @@ PPCODE:
 	    freq_is_next = 1;
 	}
     }
-    XPUSHs(newRV_inc((SV *)freqs));
+    XPUSHs(sv_2mortal(newRV_noinc((SV *)freqs)));
 }
-
 
 
 void
@@ -72,10 +73,10 @@ PPCODE:
 
     string = SvPV(packed, len);
     length = len;
-    results = (AV *)sv_2mortal((SV *)newAV());
+    results = newAV();
     /* last byte cannot have high bit set */
     if (*(string + length) & 0x80)
-        croak("DBIx::TextIndex::%s(): %s", GvNAME(CvGV(cv)), "unterminated compressed integer");
+        TEXTINDEX_ERROR("unterminated compressed integer");
     while (length > 0) {
 	value = *string++; length--;
 	if (value & 0x80)
@@ -91,7 +92,7 @@ PPCODE:
 	    av_push(results, newSViv(value));
             freq_is_next = 0;
 	    continue;
-        } 
+        }
 
 	doc += value >> 1;
 	   av_push(results, newSViv(doc));
@@ -101,9 +102,53 @@ PPCODE:
 	    freq_is_next = 1;
 	}
     }
-    XPUSHs(newRV_inc((SV *)results));
+    XPUSHs(sv_2mortal(newRV_noinc((SV *)results)));
 }
 
+void
+term_docs_array(packed)
+SV *packed
+PPCODE:
+{
+    char *string;
+    STRLEN len;
+    int length;
+    unsigned int value;
+    int freq_is_next = 0;
+    unsigned int doc = 0;
+    char temp;
+
+    string = SvPV(packed, len);
+    length = len;
+    /* last byte cannot have high bit set */
+    if (*(string + length) & 0x80)
+        TEXTINDEX_ERROR("unterminated compressed integer");
+    while (length > 0) {
+	value = *string++; length--;
+	if (value & 0x80)
+	{
+	    value &= 0x7f;
+	    do
+	    {
+		temp = *string++; length--;
+		value = (value << 7) + (temp & 0x7f);
+	    } while (temp & 0x80);
+	}
+	if ( freq_is_next ) {
+	    XPUSHs(sv_2mortal(newSViv(value)));
+            freq_is_next = 0;
+	    continue;
+        }
+
+	doc += value >> 1;
+	   XPUSHs(sv_2mortal(newSViv(doc)));
+	if (value & 1) {
+	    XPUSHs(sv_2mortal(newSViv(1)));
+	} else {
+	    freq_is_next = 1;
+	}
+    }
+}
 
 
 void
@@ -128,7 +173,7 @@ PPCODE:
     freqs = (AV *)sv_2mortal((SV *)newAV());
     /* last byte cannot have high bit set */
     if (*(string + length) & 0x80)
-        croak("DBIx::TextIndex::%s(): %s", GvNAME(CvGV(cv)), "unterminated compressed integer");
+        TEXTINDEX_ERROR("unterminated compressed integer");
     while (length > 0) {
 	value = *string++; length--;
 	if (value & 0x80)
@@ -159,6 +204,7 @@ PPCODE:
     XPUSHs(newRV_inc((SV *)freqs));
 }
 
+
 void
 pack_vint(ints_arrayref)
 SV *ints_arrayref
@@ -173,7 +219,7 @@ PPCODE:
              (term_freqs = (AV*)SvRV(ints_arrayref)) &&
              SvTYPE(term_freqs) == SVt_PVAV                   )   )
     {
-        croak("DBIx::TextIndex::%s(): %s", GvNAME(CvGV(cv)), "args must be arrayref");
+        TEXTINDEX_ERROR("args must be arrayref");
     }
     length = av_len(term_freqs);
     if (length < 0)
@@ -202,34 +248,33 @@ PPCODE:
 }
 
 
-
 void
 pack_term_docs(term_docs_arrayref)
 SV *term_docs_arrayref
 PPCODE:
 {
     char *packed;
-    AV *term_docs;
     I32 length = 0;
-    unsigned int i, j, last_doc, doc, freq, value;
+    unsigned int i, j, last_doc, value;
     register unsigned long buff;
-    if ( ! ( SvROK(term_docs_arrayref) &&
-             (term_docs = (AV*)SvRV(term_docs_arrayref)) &&
-             SvTYPE(term_docs) == SVt_PVAV                   )   )
+    if (( !SvROK(term_docs_arrayref)
+           || (SvTYPE(SvRV(term_docs_arrayref)) != SVt_PVAV) ))
     {
-        croak("DBIx::TextIndex::%s(): %s", GvNAME(CvGV(cv)), "args must be arrayref");
+        TEXTINDEX_ERROR("args must be arrayref");
     }
-    length = av_len(term_docs);
+    length = av_len((AV *)SvRV(term_docs_arrayref));
     if (length < 1)
         XSRETURN_UNDEF;
     if ((length + 1) % 2 != 0)
-        croak("DBIx::TextIndex::%s(): %s", GvNAME(CvGV(cv)), "array must contain even number of elements");
-    New(1,  packed, (4 * (length + 1)), char );
+        TEXTINDEX_ERROR("array must contain even number of elements");
+    New(1,  packed, (4 * (length + 1)), char);
+    if (packed == NULL)
+        TEXTINDEX_ERROR("unable to allocate memory");
     j = 0;
     last_doc = 0;
     for (i = 0 ; i <= length ; i+= 2) {
-        doc  = SvIV(*av_fetch(term_docs, i, 0));
-	freq = SvIV(*av_fetch(term_docs, i + 1, 0));
+        int doc  = SvIV(*av_fetch((AV *)SvRV(term_docs_arrayref), i, 0));
+	int freq = SvIV(*av_fetch((AV *)SvRV(term_docs_arrayref), i + 1, 0));
 
 	value = (doc - last_doc) << 1;
 	if (freq == 1)
@@ -265,6 +310,6 @@ PPCODE:
         }
         last_doc = doc;
     }
-    XPUSHs(sv_2mortal(newSVpv(packed, j)));
+    XPUSHs(sv_2mortal(newSVpv((char *)packed, j)));
     Safefree(packed);
 }
