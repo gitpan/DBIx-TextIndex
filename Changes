@@ -2,9 +2,28 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
-0.08 Bug fix: add_mask() was not inserting masks
+0.10
 
-0.07 UPGRADE WARNING: collection table format changed, use new method
+    Fixed collection table upgrade bug
+
+0.09 
+
+    Changed $MAX_WORD_LENGTH default to 20
+
+    Allow numbers to be indexed as words
+
+    Use HTML::Entities to decode entities in indexed documents, on by default. Set option decode_html_entities to 0 to disable.
+
+    Use $dbh->tables to check for existence of tables (caution, may not
+    work in DBI > 1.30).
+
+0.08 
+
+    Bug fix: add_mask() was not inserting masks
+
+0.07
+
+    UPGRADE WARNING: collection table format changed, use new method
     $index->upgrade_collection_table() to recreate collection table. 
     Calling initialize() method for a new collection will also upgrade
     collection table. Index backup recommended.
@@ -29,7 +48,7 @@ Revision history for Perl extension DBIx::TextIndex.
 
 0.06 
 
-  tripie's patch v2 updates:
+    tripie's patch v2 updates:
 
     - a bug in document removing proccess related to incorrect
     'occurency' data updates when multi-field documents were removed,
@@ -186,12 +205,16 @@ Revision history for Perl extension DBIx::TextIndex.
 
     Tomas Styblo, tripie@cpan.org
 
-0.05 Added unscored_search() which returns a reference to an array of
+0.05
+
+    Added unscored_search() which returns a reference to an array of
 document_ids, without scores.  Should be much faster than scored search.
 
     Added error handling in case _occurence() doesn't return a number.
 
-0.04 Bug fix: add_document() will return if passed empty array ref instead
+0.04
+
+    Bug fix: add_document() will return if passed empty array ref instead
 of producing error.
 
     Changed _boolean_compare() and _phrase_search() so and_words and
@@ -201,10 +224,16 @@ final result set.
 
     Scores are scaled lower in _search().
 
-0.03 Added example scripts in examples/.
+0.03
 
-0.02 Added or_mask_set.
+    Added example scripts in examples/.
 
-0.01 Initial public release.  Should be considered beta, and methods may be
+0.02
+
+    Added or_mask_set.
+
+0.01
+
+    Initial public release.  Should be considered beta, and methods may be
 added or changed until the first stable release.
 

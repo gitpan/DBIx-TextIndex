@@ -3,31 +3,49 @@ NAME
     databases
 
 SYNOPSIS
-    use DBIx::TextIndex;
+     use DBIx::TextIndex;
 
-    my $index = DBIx::TextIndex->new({ document_dbh => $document_dbh,
-    document_table => 'document_table', document_fields => ['column_1',
-    'column_2'], document_id_field => 'primary_key', index_dbh =>
-    $index_dbh, collection => 'collection_1', db => 'mysql', proximity_index
-    => 0, errors => { empty_query => "your query was empty", quote_count =>
-    "phrases must be quoted correctly", no_results => "your seach did not
-    produce any results", no_results_stop => "no results, these words were
-    stoplisted: " }, language => 'en', # cz or en stoplist => [ 'en' ],
-    max_word_length => 12, result_threshold => 5000, phrase_threshold =>
-    1000, min_wildcard_length => 5, print_activity => 0 });
+     my $index = DBIx::TextIndex->new({
+         document_dbh => $document_dbh,
+         document_table => 'document_table',
+         document_fields => ['column_1', 'column_2'],
+         document_id_field => 'primary_key',
+         index_dbh => $index_dbh,
+         collection => 'collection_1',
+         db => 'mysql',
+         proximity_index => 0,
+         errors => {
+             empty_query => "your query was empty",
+             quote_count => "phrases must be quoted correctly",
+             no_results => "your seach did not produce any results",
+             no_results_stop => "no results, these words were stoplisted: "
+         },
+         language => 'en', # cz or en
+         stoplist => [ 'en' ],
+         max_word_length => 12,
+         result_threshold => 5000,
+         phrase_threshold => 1000,
+         min_wildcard_length => 5,
+         decode_html_entities => 1,
+         print_activity => 0
+     });
 
-    $index->initialize;
+     $index->initialize;
 
-    $index->add_document(\@document_ids);
+     $index->add_document(\@document_ids);
 
-    my $results = $index->search({ column_1 => '"a phrase" +and -not or',
-    column_2 => 'more words', });
+     my $results = $index->search({
+         column_1 => '"a phrase" +and -not or',
+         column_2 => 'more words',
+     });
 
-    foreach my $document_id (sort {$$results{$b} <=> $$results{$a}} keys
-    %$results ) { print "DocumentID: $document_id Score:
-    $$results{$document_id} \n"; }
+     foreach my $document_id
+         (sort {$$results{$b} <=> $$results{$a}} keys %$results ) 
+     {
+         print "DocumentID: $document_id Score: $$results{$document_id} \n";  
+     }
 
-    $index->delete;
+     $index->delete;
 
 DESCRIPTION
     DBIx::TextIndex was developed for doing full-text searches on BLOB
@@ -81,7 +99,7 @@ DESCRIPTION
         Activates a proximity index for faster phrase searches and word
         proximity based matching. Disabled by default. Only efficient for
         bigger documents. Takes up a lot of space and slows down the
-        indexing proccess. Proximity based matching is activated by a query
+        indexing process. Proximity based matching is activated by a query
         containing a phrase in form of:
 
                 ":2 some phrase" => matches "some nice phrase"
@@ -134,6 +152,10 @@ DESCRIPTION
 
     phrase_threshold
         Defaults to 1000 documents.
+
+    decode_html_entities
+        Decode html entities before indexing documents (e.g. &amp; -> &).
+        Default is 1.
 
     print_activity
         Activates STDOUT debugging. Higher value increases verbosity.
@@ -205,11 +227,17 @@ DESCRIPTION
     documents. If an error occured while searching, $results will be a
     scalar containing an error message.
 
-    $results = $index->search({ first_field => '+andword -notword orword
-    "phrase words"', second_field => ... ... });
+     $results = $index->search({
+         first_field => '+andword -notword orword "phrase words"',
+         second_field => ...
+         ...
+     });
 
-    if (ref $results) { print "The score for $document_id is
-    $results->{$document_id}\n"; } else { print "Error: $results\n"; }
+     if (ref $results) {
+         print "The score for $document_id is $results->{$document_id}\n";
+     } else {
+         print "Error: $results\n";
+     }
 
   $index->unscored_search(\%search_args)
 
@@ -218,12 +246,17 @@ DESCRIPTION
     search(). If an error occured while searching $document_ids will be a
     scalar containing an error message.
 
-    $document_ids = $index->unscored_search({ first_field => '+andword
-    -notword orword "phrase words"', second_field => ... });
+     $document_ids = $index->unscored_search({
+         first_field => '+andword -notword orword "phrase words"',
+         second_field => ...
+     });
 
-    if (ref $document_ids) { print "Here's all the document ids:\n"; map {
-    print "$_\n" } @$document_ids; } else { print "Error: $document_ids\n";
-    }
+     if (ref $document_ids) {
+         print "Here's all the document ids:\n";
+         map { print "$_\n" } @$document_ids;
+     } else {
+         print "Error: $document_ids\n";
+     }
 
   $index->stat
 
@@ -245,28 +278,22 @@ SUPPORT FOR SEARCH MASKS
 
     Take this table:
 
-    doc_id category doc_full_text
-
-    1 green full text here ...
-
-    2 green ...
-
-    3 blue ...
-
-    4 red ...
-
-    5 blue ...
-
-    6 green ...
+     doc_id  category  doc_full_text
+     1       green     full text here ...
+     2       green     ...
+     3       blue      ...
+     4       red       ...
+     5       blue      ...
+     6       green     ...
 
     Masks that represent document ids for in each the three categories can
     be created:
 
   $index->add_mask($mask_name, \@document_ids);
 
-    $index->add_mask('green_category', [ 1, 2, 6 ]);
-    $index->add_mask('blue_category', [ 3, 5 ]);
-    $index->add_mask('red_category', [ 4 ]);
+     $index->add_mask('green_category', [ 1, 2, 6 ]);
+     $index->add_mask('blue_category', [ 3, 5 ]);
+     $index->add_mask('red_category', [ 4 ]);
 
     The first argument is an arbitrary string, and the second is a reference
     to any array of documents ids that the mask name identifies.
@@ -274,12 +301,18 @@ SUPPORT FOR SEARCH MASKS
     mask operations are passed in a second argument hash reference to
     $index->search():
 
-    %query_args = ( first_field => '+andword -notword orword "phrase
-    words"', second_field => ... ... );
+     %query_args = (
+         first_field => '+andword -notword orword "phrase words"',
+         second_field => ...
+         ...
+     );
 
-    %args = ( not_mask => \@not_mask_list, and_mask => \@and_mask_list,
-    or_mask => \@or_mask_list, or_mask_set => [ \@or_mask_list_1,
-    \@or_mask_list_2, ... ], );
+     %args = (
+         not_mask => \@not_mask_list,
+         and_mask => \@and_mask_list,
+         or_mask  => \@or_mask_list,
+         or_mask_set => [ \@or_mask_list_1, \@or_mask_list_2, ... ],
+     );
 
     $index->search(\%query_args, \%args);
 
@@ -290,7 +323,7 @@ SUPPORT FOR SEARCH MASKS
         From our example above, to narrow search results to documents not in
         green category:
 
-        $index->search(\%query_args, { not_mask => ['green_category'] });
+         $index->search(\%query_args, { not_mask => ['green_category'] });
 
     and_mask
         For each mask in the and_mask list, the intersection of the search
@@ -298,14 +331,16 @@ SUPPORT FOR SEARCH MASKS
 
         This would give return results only in blue category:
 
-        $index->search(\%query_args, { and_mask => ['blue_category'] });
+         $index->search(\%query_args,
+                        { and_mask => ['blue_category'] });
 
         Instead of using named masks, lists of document ids can be passed on
         the fly as array references. This would give the same results as the
         previous example:
 
-        my @blue_ids = (3, 5); $index->search(\%query_args, { and_mask => [
-        \@blue_ids ] });
+         my @blue_ids = (3, 5);
+         $index->search(\%query_args,
+                        { and_mask => [ \@blue_ids ] });
 
     or_mask_set
         With the or_mask_set argument, the union of all the masks in each
@@ -318,8 +353,8 @@ SUPPORT FOR SEARCH MASKS
         then the intersection of that union with the query results is
         calculated:
 
-        $index->search(\%query_args, { or_mask => [ 'blue_category',
-        'red_category' ] });
+         $index->search(\%query_args,
+                        { or_mask => [ 'blue_category', 'red_category' ] });
 
   $index->delete_mask($mask_name);
 
@@ -421,213 +456,239 @@ BUGS
 SEE ALSO
         perl(1).
 
-Revision history for Perl extension DBIx::TextIndex.
+CHANGES
+    0.10
 
-=head1 CHANGES
+        Fixed collection table upgrade bug
 
-0.08 Bug fix: add_mask() was not inserting masks
+    0.09
 
-0.07 UPGRADE WARNING: collection table format changed, use new method
-    $index->upgrade_collection_table() to recreate collection table. 
-    Calling initialize() method for a new collection will also upgrade
-    collection table. Index backup recommended.
+        Changed $MAX_WORD_LENGTH default to 20
 
-    Added error_ prefix to error message column names in collection table
+        Allow numbers to be indexed as words
 
-    Added version column to collection table
+        Use HTML::Entities to decode entities in indexed documents, on by default. Set option decode_html_entities to 0 to disable.
 
-    Added language column to collection table, removed czech_language column
+        Use $dbh->tables to check for existence of tables (caution, may not
+        work in DBI > 1.30).
 
-    UPGRADE WARNING: instead of new({ czech_language => 1}), use
-    new({ language => 'cz' })
+    0.08
 
-    Bug fix: _store_collection_info() error if stop lists are not used
+        Bug fix: add_mask() was not inserting masks
 
-    unscored_search() will now return a scalar error message
-    if an error occurs in search
+    0.07
 
-    search() will croak if passed an invalid field name to search on
+        UPGRADE WARNING: collection table format changed, use new method
+        $index->upgrade_collection_table() to recreate collection table. 
+        Calling initialize() method for a new collection will also upgrade
+        collection table. Index backup recommended.
 
-    Added documentation for mask operations
+        Added error_ prefix to error message column names in collection table
 
-0.06 
+        Added version column to collection table
 
-  tripie's patch v2 updates:
+        Added language column to collection table, removed czech_language column
 
-    - a bug in document removing proccess related to incorrect
-    'occurency' data updates when multi-field documents were removed,
-    was fixed.  The methods remove_document() and _inverted_remove()
-    were affected.
+        UPGRADE WARNING: instead of new({ czech_language => 1}), use
+        new({ language => 'cz' })
 
-    - a bug related to wildcards in queries in form of "+word +next%"
-    or "+word% +next%" was fixed
+        Bug fix: _store_collection_info() error if stop lists are not used
 
-    - a bug related to "%" wildcards used while searching of
-    multi-field documents was fixed
+        unscored_search() will now return a scalar error message
+        if an error occurs in search
 
-    - a bug related to stoplists and phrases that contain a
-    non-stoplisted word together with a stoplisted word was fixed
+        search() will croak if passed an invalid field name to search on
 
-    - a new full-featured solution of highligting of query words or
-    patterns in content of resulting documents was added
+        Added documentation for mask operations
 
-    I've written a new module HTML::Highlight, that can be used
-    either independently or together with DBIx::TextIndex. Its
-    advantages include:
+    0.06
 
-      - it makes highlighting very easy
-      - takes phrases and wildcards into account
-      - supports diacritics insensitive highlighting for iso-8859-2
-        languages
-      - takes HTML tags into account. That means when a user searches
-        for for example 'font', than a FONT element in <FONT COLOR="red">
-        does not get "highlighted".
-		
-    The module provides a very nice Google-like highlighting using
-    different colors for different words or phrases.
+        tripie's patch v2 updates:
 
-    The module works together with DBIx::TextIndex using its new method
-    html_highlight().
+        - a bug in document removing proccess related to incorrect
+        'occurency' data updates when multi-field documents were removed,
+        was fixed.  The methods remove_document() and _inverted_remove()
+        were affected.
 
-    The module can also be used to preview a context in which query
-    words appear in resulting documents.
-		
-    - the old method highlight() was not changed nor removed for sake of
-    compatibility with old code
-	
-    - I put a new 'html_search.cgi' script to examples/ to show how the new
-    highligting and context previewing works.
-	  
-    - the HTML::Highlight module can be found on CPAN - 
-    http://www.cpan.org/authors/id/T/TR/TRIPIE/
+        - a bug related to wildcards in queries in form of "+word +next%"
+        or "+word% +next%" was fixed
 
-    - the new highlighting solution has been documented in a new section
-    of the documentation
-	  
-  tripie v1 changes:
+        - a bug related to "%" wildcards used while searching of
+        multi-field documents was fixed
 
-    added proximity indexing
-      - based on positions of words in a document
-      - by default it is disabled, activate it by new option "proximity_index"
-      - very efficient for bigger documents, much worse for small ones
-      - it's very big (approx. 20 bytes for each word)
-      - allows fast proximity based searches in form of:
-        ":2 some phrase" => matches "some nice phrase"
-        ":1 some phrase" => matches only exact "some phrase"
-        ":10 some phrase" => matches "some [1..9 words] phrase"
-        defaults to ":1" when omitted
-      - the proximity matches work only forwards, not backwards,
-        that means:
-        ":3 some phrase" does not match "phrase nice some" or "phrase some"
+        - a bug related to stoplists and phrases that contain a
+        non-stoplisted word together with a stoplisted word was fixed
 
-    rewrote the word splitter and query parser
-      - added support for czech language diacritics insensitive indexing
-        and searching (option "czech_language")
-	(note: changed option to "language", pass value "cz" to enable -dkoch)
-        that is implemented by converting both the indexed data and
-	the query from iso-8859-2 to ASCII
+        - a new full-featured solution of highligting of query words or
+        patterns in content of resulting documents was added
 
-      - this can also be used for other iso-8859-2 based Slavic languages
+        I've written a new module HTML::Highlight, that can be used
+        either independently or together with DBIx::TextIndex. Its
+        advantages include:
 
-      - the above is performed by my module "CzFast" that can
-        be found on CPAN (my CPAN id is "TRIPIE"), and is optional
+          - it makes highlighting very easy
+          - takes phrases and wildcards into account
+          - supports diacritics insensitive highlighting for iso-8859-2
+            languages
+          - takes HTML tags into account. That means when a user searches
+            for for example 'font', than a FONT element in <FONT COLOR="red">
+            does not get "highlighted".
+                
+        The module provides a very nice Google-like highlighting using
+        different colors for different words or phrases.
 
-    added partial pattern matching using wildcards "%" or "*"
-      - these wildcards can be used at end of a word to match all words
-        that begin with that word, ie.
+        The module works together with DBIx::TextIndex using its new method
+        html_highlight().
 
-        the "%" character means "match any characters"
+        The module can also be used to preview a context in which query
+        words appear in resulting documents.
+                
+        - the old method highlight() was not changed nor removed for sake of
+        compatibility with old code
+        
+        - I put a new 'html_search.cgi' script to examples/ to show how the new
+        highligting and context previewing works.
+          
+        - the HTML::Highlight module can be found on CPAN - 
+        http://www.cpan.org/authors/id/T/TR/TRIPIE/
 
-        car%	==> matches "car", "cars", "careful", "cartel", ....
+        - the new highlighting solution has been documented in a new section
+        of the documentation
+          
+      tripie v1 changes:
 
-        the "*" character means "match also the plural form"
+        added proximity indexing
+          - based on positions of words in a document
+          - by default it is disabled, activate it by new option "proximity_index"
+          - very efficient for bigger documents, much worse for small ones
+          - it's very big (approx. 20 bytes for each word)
+          - allows fast proximity based searches in form of:
+            ":2 some phrase" => matches "some nice phrase"
+            ":1 some phrase" => matches only exact "some phrase"
+            ":10 some phrase" => matches "some [1..9 words] phrase"
+            defaults to ":1" when omitted
+          - the proximity matches work only forwards, not backwards,
+            that means:
+            ":3 some phrase" does not match "phrase nice some" or "phrase some"
 
-        car*	==> matches only "car" or "cars"
+        rewrote the word splitter and query parser
+          - added support for czech language diacritics insensitive indexing
+            and searching (option "czech_language")
+            (note: changed option to "language", pass value "cz" to enable -dkoch)
+            that is implemented by converting both the indexed data and
+            the query from iso-8859-2 to ASCII
 
-      - added option "min_wildcard_length" to specify minimal length of a
-        word base appearing before the "%" wildcard character to avoid
-        selection of excessive amount of results
+          - this can also be used for other iso-8859-2 based Slavic languages
 
-    added a database abstraction layer - all SQL queries were moved to
-    separate module (see lib/ and the docs for new "db" option) and
-    polished a bit for better maintainability and possible support of
-    other SQL dialects
+          - the above is performed by my module "CzFast" that can
+            be found on CPAN (my CPAN id is "TRIPIE"), and is optional
 
-    added stoplists
-      - some words that are too common (are present in almost every document)
-	are not indexed and are removed from the search query before processing
-	to avoid expensive processing of excessively huge result sets
-      - user is notified when a search does not produce any results because
-	some words he used in his query were stoplisted (no_results_stop)
-      - stoplists can be easily localized or modified 
-      - default is not to use any stoplist, one or more stoplists 
-	can be selected using the "stoplist" option
-      - stoplist data files are in lib/
-      - english (en) and czech (cz) stoplists are included
-      - more than one stoplist can be used
+        added partial pattern matching using wildcards "%" or "*"
+          - these wildcards can be used at end of a word to match all words
+            that begin with that word, ie.
 
-    added a facility to remove documents from the index - 
-      check the documentation for new method "remove_document" for more info.
-	
-      There is no way to recover all the space taken by the documents that are
-      being removed. This method manages to recover approx. 80% of the space.
-	
-      It's recommended to rebuild the index when you remove a
-      significant amount of documents.
+            the "%" character means "match any characters"
 
-    added a facility to obtain some statistical information about the index -
-      check the documentation for new method "stat"
+            car%    ==> matches "car", "cars", "careful", "cartel", ....
 
-    max_word_length, phrase_threshold and result_threshold are now configurable
-    options
+            the "*" character means "match also the plural form"
 
-    added configuration options to customize/localize the error messages
-    (no_results etc.)
+            car*    ==> matches only "car" or "cars"
 
-    all new configuration options are properly stored in collection's data
+          - added option "min_wildcard_length" to specify minimal length of a
+            word base appearing before the "%" wildcard character to avoid
+            selection of excessive amount of results
 
-    max_word_length limit now works much better - all words are stripped
-    down to the maximum size before they are stored to the index,
-    and also all query words are stripped down to the maximum word
-    size before they are proccessed. Now when the max word length
-    is set to, say, six and a user searches for for example
-    "consciousness", all documents containing any words beginning
-    with "consci" are returned Therefore the new max_word_length
-    option is not a limit of a word size, but rather a
-    "resolution" preference.  added some comments and occasionally
-    corrected indentation
+        added a database abstraction layer - all SQL queries were moved to
+        separate module (see lib/ and the docs for new "db" option) and
+        polished a bit for better maintainability and possible support of
+        other SQL dialects
 
-    documented the enhancements
+        added stoplists
+          - some words that are too common (are present in almost every document)
+            are not indexed and are removed from the search query before processing
+            to avoid expensive processing of excessively huge result sets
+          - user is notified when a search does not produce any results because
+            some words he used in his query were stoplisted (no_results_stop)
+          - stoplists can be easily localized or modified 
+          - default is not to use any stoplist, one or more stoplists 
+            can be selected using the "stoplist" option
+          - stoplist data files are in lib/
+          - english (en) and czech (cz) stoplists are included
+          - more than one stoplist can be used
 
-    bugfix: when RaiseError was set on a DBI connection, then one
-    query which only switched off PrintError to avoid some problems, failed
+        added a facility to remove documents from the index - 
+          check the documentation for new method "remove_document" for more info.
+        
+          There is no way to recover all the space taken by the documents that are
+          being removed. This method manages to recover approx. 80% of the space.
+        
+          It's recommended to rebuild the index when you remove a
+          significant amount of documents.
 
-    note: the interface was not changed - old code using this module should
-    run without any changes
+        added a facility to obtain some statistical information about the index -
+          check the documentation for new method "stat"
 
-    Thanks for this excellent module and please excuse my inferior English !
+        max_word_length, phrase_threshold and result_threshold are now configurable
+        options
 
-    Tomas Styblo, tripie@cpan.org
+        added configuration options to customize/localize the error messages
+        (no_results etc.)
 
-0.05 Added unscored_search() which returns a reference to an array of
-document_ids, without scores.  Should be much faster than scored search.
+        all new configuration options are properly stored in collection's data
 
-    Added error handling in case _occurence() doesn't return a number.
+        max_word_length limit now works much better - all words are stripped
+        down to the maximum size before they are stored to the index,
+        and also all query words are stripped down to the maximum word
+        size before they are proccessed. Now when the max word length
+        is set to, say, six and a user searches for for example
+        "consciousness", all documents containing any words beginning
+        with "consci" are returned Therefore the new max_word_length
+        option is not a limit of a word size, but rather a
+        "resolution" preference.  added some comments and occasionally
+        corrected indentation
 
-0.04 Bug fix: add_document() will return if passed empty array ref instead
-of producing error.
+        documented the enhancements
 
-    Changed _boolean_compare() and _phrase_search() so and_words and
-phrases behave better in multiple-field searches. Result set for each
-field is calculated first, then union of all fields is taken for
-final result set.
+        bugfix: when RaiseError was set on a DBI connection, then one
+        query which only switched off PrintError to avoid some problems, failed
 
-    Scores are scaled lower in _search().
+        note: the interface was not changed - old code using this module should
+        run without any changes
 
-0.03 Added example scripts in examples/.
+        Thanks for this excellent module and please excuse my inferior English !
 
-0.02 Added or_mask_set.
+        Tomas Styblo, tripie@cpan.org
 
-0.01 Initial public release.  Should be considered beta, and methods may be
-added or changed until the first stable release.
+    0.05
+
+        Added unscored_search() which returns a reference to an array of
+    document_ids, without scores.  Should be much faster than scored search.
+
+        Added error handling in case _occurence() doesn't return a number.
+
+    0.04
+
+        Bug fix: add_document() will return if passed empty array ref instead
+    of producing error.
+
+        Changed _boolean_compare() and _phrase_search() so and_words and
+    phrases behave better in multiple-field searches. Result set for each
+    field is calculated first, then union of all fields is taken for
+    final result set.
+
+        Scores are scaled lower in _search().
+
+    0.03
+
+        Added example scripts in examples/.
+
+    0.02
+
+        Added or_mask_set.
+
+    0.01
+
+        Initial public release.  Should be considered beta, and methods may be
+    added or changed until the first stable release.
 

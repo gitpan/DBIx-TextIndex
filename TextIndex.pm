@@ -4,17 +4,17 @@ use strict;
 
 use Bit::Vector ();
 use Carp qw(carp croak);
-use Data::Dumper qw(Dumper);
+use HTML::Entities ();
 
 my $ME = "DBIx::TextIndex";
 
-$DBIx::TextIndex::VERSION = '0.08';
+$DBIx::TextIndex::VERSION = '0.10';
 
 # Version number when collection table definition last changed
-my $LAST_COLLECTION_TABLE_UPGRADE = '0.07';
+my $LAST_COLLECTION_TABLE_UPGRADE = '0.10';
 
 # Largest size word to be indexed
-my $MAX_WORD_LENGTH = 12;
+my $MAX_WORD_LENGTH = 20;
 
 # Minimum size of word base before a "%" wildcard
 my $MIN_WILDCARD_LENGTH = 5;
@@ -62,6 +62,7 @@ my @COLLECTION_FIELDS = qw(
     result_threshold
     phrase_threshold
     min_wildcard_length
+    decode_html_entities
 );
 
 my %COLLECTION_FIELD_DEFAULT = (
@@ -82,6 +83,7 @@ my %COLLECTION_FIELD_DEFAULT = (
     result_threshold => $RESULT_THRESHOLD,
     phrase_threshold => $PHRASE_THRESHOLD,
     min_wildcard_length => $MIN_WILDCARD_LENGTH,
+    decode_html_entities => '1',
 );
 
 
@@ -133,6 +135,8 @@ sub new {
 	    || $PHRASE_THRESHOLD;
 	$self->{MIN_WILDCARD_LENGTH} = $args->{min_wildcard_length}
 	    || $MIN_WILDCARD_LENGTH;
+	$self->{DECODE_HTML_ENTITIES} = $args->{decode_html_entities}
+	    || 1;
     }
     $self->{CZECH_LANGUAGE} = $self->{LANGUAGE} eq 'cz' ? 1 : 0;
     $self->{MAXTF_TABLE} = $self->{COLLECTION} . '_maxtf';
@@ -570,7 +574,6 @@ sub delete {
 
 sub _collection_table_exists {
     my $self = shift;
-
     return $self->db_table_exists($COLLECTION_TABLE);
 }
 
@@ -644,6 +647,7 @@ sub upgrade_collection_table {
 	foreach my $field (@COLLECTION_FIELDS) {
 	    $new_row{$field} = exists $old_row->{$field} ?
 		$old_row->{$field} : $COLLECTION_FIELD_DEFAULT{$field};
+	    $new_row{version} = $COLLECTION_FIELD_DEFAULT{version};
 	}
 	# 'czech_language' option replaced with generic 'language'
 	if (exists $old_row->{czech_language}) {
@@ -709,6 +713,8 @@ sub _store_collection_info {
 			   $self->{RESULT_THRESHOLD},
 			   $self->{PHRASE_THRESHOLD},
 			   $self->{MIN_WILDCARD_LENGTH},
+
+			   $self->{DECODE_HTML_ENTITIES},
 			   ) || croak $DBI::errstr;
 
 }
@@ -760,6 +766,8 @@ sub _fetch_collection_info {
 		       \$self->{RESULT_THRESHOLD},
 		       \$self->{PHRASE_THRESHOLD},
 		       \$self->{MIN_WILDCARD_LENGTH},
+
+		       \$self->{DECODE_HTML_ENTITIES},
 		       );
 
     $sth->fetch;
@@ -1465,19 +1473,18 @@ sub _parse_query {
 # or diacritics, we must normalize everything to lower case
 
 sub _trans {
-	my $self = shift;
-	my $s = shift;
+    my $self = shift;
+    my $s = shift;
 
-	if ($self->{CZECH_LANGUAGE}) {
-		$s = &CzFast::czrecode('iso-8859-2', 'ascii', $s)
-	}
-	else {
+    if ($self->{CZECH_LANGUAGE}) {
+	$s = &CzFast::czrecode('iso-8859-2', 'ascii', $s);
+    } else {
     	# accents
-		$s =~ tr/\xe8\xe9\xf1\xe1/eena/;
-	}
+	$s =~ tr/\xe8\xe9\xf1\xe1/eena/;
+    }
 
-	$s = lc($s );
-	return $s;
+    $s = lc($s);
+    return $s;
 }
 
 sub _documents {
@@ -1488,12 +1495,12 @@ sub _documents {
 
     local $^W = 0; # turn off silly uninitialized value warning
     if (@_) {
-		my ($id, $frequency) = @_;
-		$self->{DOCUMENTS}->[$field_no]->{$word} .=
-			pack 'ww', ($id, $frequency);
-		$self->{OCCURENCE}->[$field_no]->{$word}++; 
+	my ($id, $frequency) = @_;
+	$self->{DOCUMENTS}->[$field_no]->{$word} .=
+	    pack 'ww', ($id, $frequency);
+	$self->{OCCURENCE}->[$field_no]->{$word}++; 
     } else {
-		unpack 'w*', $self->_fetch_documents($field_no, $word);
+	unpack 'w*', $self->_fetch_documents($field_no, $word);
     }
 
 }
@@ -1620,15 +1627,11 @@ sub _words {
     # kill tags
     $document =~ s/<.*?>//g;
 
-    # kill junk
-    $document =~ s/&gt;
-				  |&lt;
-				  |&amp;
-				  |&quot;
-				  |&apos;
-				  |&copy;
-				  //xg;
-
+    # Decode HTML entities
+    if ($self->{DECODE_HTML_ENTITIES}) {
+	$document = HTML::Entities::decode($document);
+    }
+    
     $document = $self->_trans($document);
 
     # split words on any non-word character or on underscore
@@ -1636,7 +1639,7 @@ sub _words {
     return grep {
 	
 	$_ = substr($_, 0, $self->{MAX_WORD_LENGTH});
-	$_ =~ /[a-z]+/ && not $self->_stoplisted($_)
+	$_ =~ /[a-z0-9]+/ && not $self->_stoplisted($_)
 
     } split(/[^a-zA-Z0-9]+/, $document);
 }
@@ -1721,48 +1724,49 @@ DBIx::TextIndex - Perl extension for full-text searching in SQL databases
 
 =head1 SYNOPSIS
 
-use DBIx::TextIndex;
+ use DBIx::TextIndex;
 
-my $index = DBIx::TextIndex->new({
-    document_dbh => $document_dbh,
-    document_table => 'document_table',
-    document_fields => ['column_1', 'column_2'],
-    document_id_field => 'primary_key',
-    index_dbh => $index_dbh,
-    collection => 'collection_1',
-    db => 'mysql',
-    proximity_index => 0,
-    errors => {
-        empty_query => "your query was empty",
-        quote_count => "phrases must be quoted correctly",
-    	no_results => "your seach did not produce any results",
-    	no_results_stop => "no results, these words were stoplisted: "
-    },
-    language => 'en', # cz or en
-    stoplist => [ 'en' ],
-    max_word_length => 12,
-    result_threshold => 5000,
-    phrase_threshold => 1000,
-    min_wildcard_length => 5,
-    print_activity => 0
-});
+ my $index = DBIx::TextIndex->new({
+     document_dbh => $document_dbh,
+     document_table => 'document_table',
+     document_fields => ['column_1', 'column_2'],
+     document_id_field => 'primary_key',
+     index_dbh => $index_dbh,
+     collection => 'collection_1',
+     db => 'mysql',
+     proximity_index => 0,
+     errors => {
+         empty_query => "your query was empty",
+         quote_count => "phrases must be quoted correctly",
+    	 no_results => "your seach did not produce any results",
+    	 no_results_stop => "no results, these words were stoplisted: "
+     },
+     language => 'en', # cz or en
+     stoplist => [ 'en' ],
+     max_word_length => 12,
+     result_threshold => 5000,
+     phrase_threshold => 1000,
+     min_wildcard_length => 5,
+     decode_html_entities => 1,
+     print_activity => 0
+ });
 
-$index->initialize;
+ $index->initialize;
 
-$index->add_document(\@document_ids);
+ $index->add_document(\@document_ids);
 
-my $results = $index->search({
-    column_1 => '"a phrase" +and -not or',
-    column_2 => 'more words',
-});
+ my $results = $index->search({
+     column_1 => '"a phrase" +and -not or',
+     column_2 => 'more words',
+ });
 
-foreach my $document_id
-    (sort {$$results{$b} <=> $$results{$a}} keys %$results ) 
-{
-    print "DocumentID: $document_id Score: $$results{$document_id} \n";  
-}
+ foreach my $document_id
+     (sort {$$results{$b} <=> $$results{$a}} keys %$results ) 
+ {
+     print "DocumentID: $document_id Score: $$results{$document_id} \n";  
+ }
 
-$index->delete;
+ $index->delete;
 
 =head1 DESCRIPTION
 
@@ -1829,7 +1833,7 @@ underscores [A-Za-z0-9_]
 Activates a proximity index for faster phrase searches and word
 proximity based matching. Disabled by default. Only efficient for
 bigger documents.  Takes up a lot of space and slows down the indexing
-proccess.  Proximity based matching is activated by a query containing
+process.  Proximity based matching is activated by a query containing
 a phrase in form of:
 
 	":2 some phrase" => matches "some nice phrase"
@@ -1890,6 +1894,11 @@ Defaults to 5000 documents.
 =item phrase_threshold
 
 Defaults to 1000 documents.
+
+=item decode_html_entities
+
+Decode html entities before indexing documents (e.g. &amp; -> &). 
+Default is 1.
 
 =item print_activity
 
@@ -1964,17 +1973,17 @@ hash are document ids, and the values are the relative scores of the
 documents.  If an error occured while searching, $results will be a
 scalar containing an error message.
 
-$results = $index->search({
-    first_field => '+andword -notword orword "phrase words"',
-    second_field => ...
-    ...
-});
+ $results = $index->search({
+     first_field => '+andword -notword orword "phrase words"',
+     second_field => ...
+     ...
+ });
 
-if (ref $results) {
-    print "The score for $document_id is $results->{$document_id}\n";
-} else {
-    print "Error: $results\n";
-}
+ if (ref $results) {
+     print "The score for $document_id is $results->{$document_id}\n";
+ } else {
+     print "Error: $results\n";
+ }
 
 =head2 $index->unscored_search(\%search_args)
 
@@ -1983,17 +1992,17 @@ the scoring algorithm is skipped, this method is much faster than search().
 If an error occured while searching $document_ids will be a scalar
 containing an error message.
 
-$document_ids = $index->unscored_search({
-    first_field => '+andword -notword orword "phrase words"',
-    second_field => ...
-});
+ $document_ids = $index->unscored_search({
+     first_field => '+andword -notword orword "phrase words"',
+     second_field => ...
+ });
 
-if (ref $document_ids) {
-    print "Here's all the document ids:\n";
-    map { print "$_\n" } @$document_ids;
-} else {
-    print "Error: $document_ids\n";
-}
+ if (ref $document_ids) {
+     print "Here's all the document ids:\n";
+     map { print "$_\n" } @$document_ids;
+ } else {
+     print "Error: $document_ids\n";
+ }
 
 =head2 $index->stat
 
@@ -2017,28 +2026,22 @@ document ids to search results.
 
 Take this table:
 
-doc_id  category  doc_full_text
-
-1       green     full text here ...
-
-2       green     ...
-
-3       blue      ...
-
-4       red       ...
-
-5       blue      ...
-
-6       green     ...
+ doc_id  category  doc_full_text
+ 1       green     full text here ...
+ 2       green     ...
+ 3       blue      ...
+ 4       red       ...
+ 5       blue      ...
+ 6       green     ...
 
 Masks that represent document ids for in each the three categories can
 be created:
 
 =head2 $index->add_mask($mask_name, \@document_ids);
 
-$index->add_mask('green_category', [ 1, 2, 6 ]);
-$index->add_mask('blue_category', [ 3, 5 ]);
-$index->add_mask('red_category', [ 4 ]);
+ $index->add_mask('green_category', [ 1, 2, 6 ]);
+ $index->add_mask('blue_category', [ 3, 5 ]);
+ $index->add_mask('red_category', [ 4 ]);
 
 The first argument is an arbitrary string, and the second is a
 reference to any array of documents ids that the mask name identifies.
@@ -2046,18 +2049,18 @@ reference to any array of documents ids that the mask name identifies.
 mask operations are passed in a second argument hash reference to
 $index->search():
 
-%query_args = (
-    first_field => '+andword -notword orword "phrase words"',
-    second_field => ...
-    ...
-);
+ %query_args = (
+     first_field => '+andword -notword orword "phrase words"',
+     second_field => ...
+     ...
+ );
 
-%args = (
-    not_mask => \@not_mask_list,
-    and_mask => \@and_mask_list,
-    or_mask  => \@or_mask_list,
-    or_mask_set => [ \@or_mask_list_1, \@or_mask_list_2, ... ],
-);
+ %args = (
+     not_mask => \@not_mask_list,
+     and_mask => \@and_mask_list,
+     or_mask  => \@or_mask_list,
+     or_mask_set => [ \@or_mask_list_1, \@or_mask_list_2, ... ],
+ );
 
 $index->search(\%query_args, \%args);
 
@@ -2070,7 +2073,7 @@ For each mask in the not_mask list, the intersection of the search query results
 From our example above, to narrow search results to documents not in
 green category:
 
-$index->search(\%query_args, { not_mask => ['green_category'] });
+ $index->search(\%query_args, { not_mask => ['green_category'] });
 
 =item and_mask
 
@@ -2079,16 +2082,16 @@ query results and all documents in the mask is calculated.
 
 This would give return results only in blue category:
 
-$index->search(\%query_args,
-               { and_mask => ['blue_category'] });
+ $index->search(\%query_args,
+                { and_mask => ['blue_category'] });
 
 Instead of using named masks, lists of document ids can be passed on
 the fly as array references.  This would give the same results as the
 previous example:
 
-my @blue_ids = (3, 5);
-$index->search(\%query_args,
-               { and_mask => [ \@blue_ids ] });
+ my @blue_ids = (3, 5);
+ $index->search(\%query_args,
+                { and_mask => [ \@blue_ids ] });
 
 =item or_mask_set
 
@@ -2103,8 +2106,8 @@ this example, the union of blue_category and red_category is taken,
 and then the intersection of that union with the query results is
 calculated:
 
-$index->search(\%query_args,
-               { or_mask => [ 'blue_category', 'red_category' ] });
+ $index->search(\%query_args,
+                { or_mask => [ 'blue_category', 'red_category' ] });
 
 =head2 $index->delete_mask($mask_name);
 

@@ -10,6 +10,7 @@ sub db_add_mask {
 replace into $self->{MASK_TABLE} (mask, documents_vector)
 values (?, ?)
 END
+
 }
 
 sub db_delete_mask {
@@ -18,30 +19,29 @@ sub db_delete_mask {
 delete from $self->{MASK_TABLE}
 where mask = ?
 END
+
 }
 
 sub db_drop_table {
-	my $self = shift;
-	my $table = shift;
-	my $sql = "
+    my $self = shift;
+    my $table = shift;
+    my $sql = <<END;
+drop table if exists $table
+END
 
-		DROP TABLE IF EXISTS $table
+    $self->{INDEX_DBH}->do($sql);
 
-    ";
-	$self->{INDEX_DBH}->do($sql);
 }
 
 sub db_table_exists {
     my $self = shift;
     my $table = shift;
-    my $sql = "desc $table";
-    my $sth = $self->{INDEX_DBH}->prepare($sql);
-    $sth->{PrintError} = 0;
-    $sth->{RaiseError} = 0;
-    $sth->execute;
-    my $table_exists = $sth->rows > 0 ? 1 : 0;
-    $sth->finish;
-    return $table_exists;
+    # FIXME: $dbh->tables is marked deprecated in DBI 1.30 documentation
+    my @tables = $self->{INDEX_DBH}->tables;
+    for (@tables) {
+	return 1 if $table eq $_;
+    }
+    return 0;
 }
 
 sub db_create_collection_table {
@@ -65,6 +65,7 @@ CREATE TABLE collection (
   result_threshold int(10) unsigned NOT NULL default '0',
   phrase_threshold int(10) unsigned NOT NULL default '0',
   min_wildcard_length int(10) unsigned NOT NULL default '0',
+  decode_html_entities enum('0', '1') NOT NULL default '0',
   PRIMARY KEY collection_key (collection)
 )
 END
@@ -170,32 +171,30 @@ END
 }
 
 sub db_phrase_scan_cz {
-	my $self = shift;
-	my $result_documents = shift;
-	my $fno = shift;
+    my $self = shift;
+    my $result_documents = shift;
+    my $fno = shift;
 
-    return "
+    return <<END;
+select $self->{DOCUMENT_ID_FIELD}, $self->{DOCUMENT_FIELDS}->[$fno]
+from   $self->{DOCUMENT_TABLE}
+where  $self->{DOCUMENT_ID_FIELD} in ($result_documents)
+END
 
-        SELECT $self->{DOCUMENT_ID_FIELD}, $self->{DOCUMENT_FIELDS}->[$fno]
-        FROM   $self->{DOCUMENT_TABLE}
-        WHERE  $self->{DOCUMENT_ID_FIELD} IN ($result_documents)
-
-    ";
 }
 
 sub db_phrase_scan {
-	my $self = shift;
-	my $result_documents = shift;
-	my $fno = shift;
+    my $self = shift;
+    my $result_documents = shift;
+    my $fno = shift;
 
-    return "
+    return <<END;
+select $self->{DOCUMENT_ID_FIELD}
+from   $self->{DOCUMENT_TABLE}
+where  $self->{DOCUMENT_ID_FIELD} IN ($result_documents)
+       and $self->{DOCUMENT_FIELDS}->[$fno] like ?
+END
 
-        SELECT $self->{DOCUMENT_ID_FIELD}
-        FROM   $self->{DOCUMENT_TABLE}
-        WHERE  $self->{DOCUMENT_ID_FIELD} IN ($result_documents)
-        	   AND $self->{DOCUMENT_FIELDS}->[$fno] LIKE ?
-
-    ";
 }
 
 sub db_fetch_maxtf {
@@ -211,40 +210,37 @@ END
 }
 
 sub db_occurence {
-	my $self = shift;
-	my $table = shift;
+    my $self = shift;
+    my $table = shift;
 
-    return "
+    return <<END;
+select occurence from $table
+where word = ?
+END
 
-		SELECT occurence FROM $table
-		WHERE word = ?
-
-    ";
 }
 
 sub db_fetch_mask {
-	my $self = shift;
+    my $self = shift;
 
-    return "
+    return <<END;
+select documents_vector
+from $self->{MASK_TABLE}
+where mask = ?
+END
 
-    	SELECT documents_vector
-        FROM $self->{MASK_TABLE}
-        WHERE mask = ?
-
-     ";
 }
 
 sub db_fetch_documents {
-	my $self = shift;
-	my $table = shift;
+    my $self = shift;
+    my $table = shift;
 
-    return "
+    return <<END;
+select documents
+from $table
+where word = ?
+END
 
-    	SELECT documents
-		FROM $table
-        WHERE word = ?
-
-	";
 }
 
 sub db_fetch_documents_vector {
@@ -260,207 +256,192 @@ END
 }
 
 sub db_fetch_words {
-	my $self = shift;
-	my $table = shift;
+    my $self = shift;
+    my $table = shift;
 
-    return "
+    return <<END;
+select word
+from $table
+where word like ?
+END
 
-    	SELECT word
-		FROM $table
-        WHERE word LIKE ?
-
-	";
 }
 
 sub db_ping_document {
-	my $self = shift;
+    my $self = shift;
 
-	return "
+    return <<END;
+select 1
+from $self->{DOCUMENT_TABLE}
+where $self->{DOCUMENT_ID_FIELD} = ?
+END
 
-		SELECT 1
-		FROM $self->{DOCUMENT_TABLE}
-        WHERE $self->{DOCUMENT_ID_FIELD} = ?
-
-	";
 }
 
 sub db_fetch_document {
-	my $self = shift;
-	my $field = shift;
+    my $self = shift;
+    my $field = shift;
 
-	return "
+    return <<END;
+select $field
+from $self->{DOCUMENT_TABLE}
+where $self->{DOCUMENT_ID_FIELD} = ?
+END
 
-		SELECT $field
-        FROM $self->{DOCUMENT_TABLE}
-        WHERE $self->{DOCUMENT_ID_FIELD} = ?
-
-	";
 }
 
 sub db_update_maxtf {
-	my $self = shift;
+    my $self = shift;
 
-    return "
+    return <<END;
+replace into $self->{MAXTF_TABLE} (field_no, maxtf)
+values (?, ?)
+END
 
-        REPLACE INTO $self->{MAXTF_TABLE} (field_no, maxtf)
-        VALUES (?, ?)
-
-    ";
 }
 
 sub db_inverted_replace {
-	my $self = shift;
-	my $table = shift;
+    my $self = shift;
+    my $table = shift;
 
-	return "
+    return <<END;
+replace into $table
+(word, occurence, documents_vector, documents)
+values (?, ?, ?, ?)
+END
 
-        REPLACE INTO $table
-        (word, occurence, documents_vector, documents)
-        VALUES (?, ?, ?, ?)
-
-	";
 }
 
 sub db_inverted_remove {
-	my $self = shift;
-	my $table = shift;
+    my $self = shift;
+    my $table = shift;
+    
+    return <<END;
+delete from $table
+where word = ?
+END
 
-	return "
-
-        DELETE FROM $table
-		WHERE word = ?
-
-	";
 }
 
 sub db_inverted_select {
-	my $self = shift;
-	my $table = shift;
+    my $self = shift;
+    my $table = shift;
 
-	return "
+    return <<END;
+select occurence, documents_vector, documents
+from $table
+where word = ?
+END
 
-		SELECT occurence, documents_vector, documents
-		FROM $table
-		WHERE word = ?
-
-    ";
 }
 
 sub db_create_mask {
-	my $self = shift;
+    my $self = shift;
 
-	return "
+    return <<END;
+create table $self->{MASK_TABLE} (
+  mask             varchar(100)            not null,
+  documents_vector mediumblob 	           not null,
+  primary key 	   mask_key (mask)
+)
+END
 
-    	CREATE TABLE $self->{MASK_TABLE} (
-			mask 				varchar(100) 	not null,
-			documents_vector 	mediumblob 		not null,
-            PRIMARY KEY 		mask_key (mask)
-		)
-
-  ";
 }
 
 sub db_create_maxterm {
-	my $self = shift;
+    my $self = shift;
 
-	return "
+    return <<END;
+create table $self->{MAXTF_TABLE} (
+  field_no 	   smallint unsigned 	   not null,
+  maxtf 	   mediumblob 		   not null,
+  primary key 	   field_no_key (field_no)
+)
+END
 
-        CREATE TABLE $self->{MAXTF_TABLE} (
-			field_no 			smallint unsigned 	not null,
-			maxtf 				mediumblob 			not null,
-			PRIMARY KEY 		field_no_key (field_no)
-		)
-
-	";
 }
 
 sub db_create_inverted {
-	my $self = shift;
-	my $table = shift;
-	my $max_word = $self->{MAX_WORD_LENGTH};
+    my $self = shift;
+    my $table = shift;
+    my $max_word = $self->{MAX_WORD_LENGTH};
 
-	return "
+    return <<END;
+create table $table (
+  word             varchar($max_word)      not null,
+  occurence 	   int unsigned 	   not null,
+  documents_vector mediumblob 		   not null,
+  documents	   mediumblob 		   not null,
+  PRIMARY KEY 	   word_key (word)
+)
+END
 
-		CREATE TABLE $table (
- 			word 				varchar($max_word) 	not null,
-			occurence 			int unsigned 		not null,
-			documents_vector 	mediumblob 			not null,
-			documents			mediumblob 			not null,
-			PRIMARY KEY 		word_key (word)
-		)
-
-	";
 }
 
 sub db_pindex_search {
-	my $self = shift;
-	my $fno = shift;
-	my $words = shift;
-	my $documents = shift;
+    my $self = shift;
+    my $fno = shift;
+    my $words = shift;
+    my $documents = shift;
 
-	return "
+    return <<END;
+select word, document, pos
+from $self->{PINDEX_TABLES}->[$fno]
+where document in ($documents) and word in ($words)
+order by document
+END
 
-		SELECT word, document, pos
-		FROM $self->{PINDEX_TABLES}->[$fno]
-		WHERE document IN ($documents) AND
-			  word IN ($words)
-		ORDER BY document
-
-	";
 }
 
 sub db_pindex_create {
-	my $self = shift;
-	my $table = shift;
-	my $max_word = $self->{MAX_WORD_LENGTH};
+    my $self = shift;
+    my $table = shift;
+    my $max_word = $self->{MAX_WORD_LENGTH};
 
-	return "
+    return <<END;
+create table $table (
+  word		   varchar($max_word)	   not null,
+  document	   integer                 not null,
+  pos		   integer		   not null,
+  index		   (document, word)
+)
+END
 
-		CREATE TABLE $table (
-			word		VARCHAR($max_word)		NOT NULL,
-			document	INTEGER					NOT NULL,
-			pos			INTEGER					NOT NULL,
-			INDEX		(document, word)
-		)
-	";
 }
 
 sub db_pindex_add {
-	my $self = shift;
-	my $table = shift;
+    my $self = shift;
+    my $table = shift;
 
-	return "
+    return <<END;
+insert into $table (word, document, pos)
+values (?, ?, ?)
+END
 
-		INSERT INTO $table (word, document, pos)
-		VALUES (?, ?, ?)
-
-	";
 }
 
 sub db_pindex_remove {
-	my $self = shift;
-	my $table = shift;
-	my $documents = shift;
+    my $self = shift;
+    my $table = shift;
+    my $documents = shift;
 
-	return "
+    return <<END;
+delete from $table
+where document in ($documents)
+END
 
-		DELETE FROM $table
-		WHERE document IN ($documents)
-
-	";
 }
 
 
 sub db_total_words {
-	my $self = shift;
-	my $table = shift;
-	
-	return "
+    my $self = shift;
+    my $table = shift;
 
-		SELECT SUM(occurence)
-		FROM $table
-		
-	";
+    return <<END;
+select SUM(occurence)
+from $table
+END
+
 }
 
 1;
