@@ -5,45 +5,26 @@ NAME
 SYNOPSIS
      use DBIx::TextIndex;
 
-     my $index = DBIx::TextIndex->new({
-         doc_dbh => $doc_dbh,
-         doc_table => 'doc_table',
-         doc_fields => ['column_1', 'column_2'],
-         doc_id_field => 'primary_key',
+     $index = DBIx::TextIndex->new({
          index_dbh => $index_dbh,
-         collection => 'collection_1',
-         proximity_index => 1,
-         errors => {
-             empty_query => "your query was empty",
-             quote_count => "phrases must be quoted correctly",
-             no_results => "your seach did not produce any results",
-             no_results_stop => "no results, these words were stoplisted: "
-         },
-         charset => 'iso-8859-1'.
-         stoplist => [ 'en' ],
-         max_word_length => 12,
-         phrase_threshold => 1000,
-         min_wildcard_length => 1,
-         decode_html_entities => 1,
-         print_activity => 0
+         collection => 'collection_name',
+         doc_fields => ['field1', 'field2'],
      });
 
-     $index->initialize;
+     $index->initialize();
 
-     $index->add_doc(\@doc_ids);
+     $index->add( key1 => { field1 => 'some text', field2 => 'more text' } );
 
-     my $results = $index->search({
-         column_1 => '"a phrase" +and -not or',
-         column_2 => 'more words',
+     $results = $index->search({
+         field1 => '"a phrase" +and -not or',
+         field2 => 'more words',
      });
 
-     foreach my $doc_id
+     foreach my $key
          (sort {$$results{$b} <=> $$results{$a}} keys %$results ) 
      {
-         print "DocID: $doc_id Score: $$results{$doc_id} \n";
+         print "Key: $key Score: $$results{$key} \n";
      }
-
-     $index->delete;
 
 DESCRIPTION
     DBIx::TextIndex was developed for doing full-text searches on BLOB
@@ -51,140 +32,389 @@ DESCRIPTION
     support should work with minor adjustments to SQL statements in the
     module. MySQL, PostgreSQL, and SQLite are currently supported.
 
-    Operates in case insensitive manner.
+    As of version 0.24, data from any source can be indexed by passing it to
+    the "add()" method as a string.
 
+INDEX CREATION
+  Preparing an index for use for the first time
+    To set up a new index, call "new()", followed by "initialize()".
+
+     $index = DBIx::TextIndex->new({
+         index_dbh => $dbh,
+         collection => 'my_books',
+         doc_fields => [ 'title', 'author', 'text' ],
+     });
+
+     $index->initialize();
+
+    "initialize()" should only be called the first time a new index is
+    created. Calling initialize a second time with the same collection name
+    will delete and re-create the index.
+
+    The "doc_fields" attribute specifies which fields of a document are
+    contained in the index. This decision must be made at initialization --
+    additional document fields cannot be added to the index later.
+
+    After the index is initialized once, subsequent calls to "new()" require
+    only the "index_dbh" and "collection" arguments.
+
+     $index = DBIx::TextIndex->new({
+         index_dbh => $dbh,
+         collection => 'my_books',
+     });
+
+  Adding documents to the index
+    Every document is made up of fields, and has a unique key that is
+    returned with search results.
+
+     $index->add( book1 => {
+                             author => 'Leo Tolstoy',
+                             title => 'War and Peace',
+                             text => '"Well, Prince, so Genoa and Lucca ...',
+                           },
+
+                  book2 => {
+                             author => 'J.R.R. Tolkien',
+                             title => 'The Hobbit',
+                             text => 'In a hole in the ground there lived ...',
+                           },
+                 );
+
+    With each call to "add()", the index is written to tables in the
+    underlying SQL database.
+
+    When adding many documents in a loop, use "begin_add()" and
+    "commit_add()" around the loop. This will increase indexing performance
+    by delaying writes to the SQL database until "commit_add()" is called.
+
+     $index->begin_add();
+
+     while ( my ($book_id, $author, $title, $text) = fetch_doc() ) {
+         $index->add( $book_id => { author => $author,
+                                    title => $title,
+                                    text => $text }   );
+     }
+
+     $index->commit_add();
+
+  Indexing data in SQL tables
+    DBIx::TextIndex has additional convenience methods to index data
+    contained in SQL tables. Before calling "initialize()" also set the
+    "doc_dbh", "doc_table", and "doc_id_field" attributes:
+
+     $index = DBIx::TextIndex->new({
+         index_dbh => $dbh,
+         collection => 'my_books',
+         doc_dbh => $doc_dbh,
+         doc_table => 'book',
+         doc_id_field => 'book_id',
+         doc_fields => [ 'title', 'author', 'text' ],
+     });
+
+     $index->initialize();
+
+    After initialization, subsequent creation of index objects only require
+    the "index_dbh", "collection", and "doc_dbh" arguments:
+
+     $index = DBIx::TextIndex->new({
+         index_dbh => $dbh,
+         collection => 'my_books',
+         doc_dbh => $doc_dbh,
+     });
+
+    Passing an array of ids to "add_doc()" indexes the "doc_fields"
+    (columns) in "doc_table" matched using the "doc_id_field" column.
+
+     $index->add_doc(1, 2, 3);
+
+    "add_doc()" creates SQL statements to retrieve data from the document
+    table before adding to the index. In the above example, a series of
+    statements like "SELECT title, author, text FROM book WHERE book_id = 1"
+    would be issued.
+
+    If more flexibility is needed, data could be fetched first and passed to
+    the "add()" method instead. For example, a multi-table JOIN could be
+    issued or several columns could be concatenated into a single index
+    field.
+
+QUERY SYNTAX
+    FIXME: This section is incomplete.
+
+    Searches are case insensitive.
+
+  Phrase Searches
+    Enclose phrases in double quotes:
+
+     "See Spot run"
+
+  Proximity Searches
+    Use the tilde "~" operator at the end of phrase to find words within a
+    certain distance.
+
+     "some phrase"~1   - matches only exact "some phrase"
+     "some phrase"~2   - matches "some other phrase"
+     "some phrase"~10  - matches "some [1..9 words] phrase"
+
+    Defaults to "~1" when omitted, which is a normal phrase search.
+
+    The proximity match works from left to right, which means ""some
+    phrase"~3" does not match "phrase other some" or "phrase some"
+
+  Wildcard Partial-Term Searches
+    You can use wildcard characters "*" or "?" at the end of or in the
+    middle of search terms:
+
+    "*" matches zero or more characters
+
+     car*     - "car", "cars", "careful", "cartel", ....
+     ca*r     - "car", "career", "caper", "cardiovascular"
+
+    "?" matches any single character
+
+      car?    - "care", "cars", "cart"
+      d?g     - "dig", "dog", "dug"
+
+    "+" at the end matches singular or plural form (naively, by appending an
+    's' to the word)
+
+      car+    - "car", "cars"
+
+    By default, at least 1 alphanumeric character must appear before the
+    first wildcard character. The option "min_wildcard_length" can changed
+    to require more alphanumeric characters before the first wildcard.
+
+    The option "max_wildcard_term_expansion" specifies the maximum number of
+    words a wildcard term can expand to before throwing a query exception.
+    The default is 30 words.
+
+USAGE
     The following methods are available:
 
-  $index = DBIx::TextIndex->new(\%args)
-    Constructor method. The first time an index is created, the following
-    arguments must be passed to new():
+  "new()"
+     $index = DBIx::TextIndex->new(\%args)
 
-     my $index = DBIx::TextIndex->new({
-         doc_dbh => $doc_dbh,
-         doc_table => 'doc_table',
-         doc_fields => ['column_1', 'column_2'],
-         doc_id_field => 'primary_key',
-         index_dbh => $index_dbh,
-         collection => 'collection_1'
-     });
+    Constructor method, accepts args as a hashref. The first time an index
+    is created, "index_dbh", "collection", "doc_fields" and must be passed.
+    For subsequent calls to new, only "index_dbh" and "collection" are
+    required.
+
+    To index documents using "add_doc()", "doc_dbh", "doc_table", and
+    "doc_id_field" are also required for initialization. "doc_dbh" is
+    required each time the index is used to add documents.
 
     Other arguments are optional.
 
+    "new()" accepts these arguments:
+
+    index_dbh
+         index_dbh => $index_dbh
+
+        DBI connection handle used to store tables for DBIx::TextIndex. Use
+        a separate database if possible to avoid name collisions with
+        existing tables.
+
+    collection
+         collection => $collection
+
+        A name for the index. Should contain only alpha-numeric characters
+        or underscores [A-Za-z0-9_]. Limited to 100 characters.
+
     doc_dbh
-        DBI connection handle to database containing text documents
+         doc_dbh => $doc_dbh
+
+        A DBI connection handle to database containing text documents
 
     doc_table
+         doc_table => $doc_table
+
         Name of database table containing text documents
 
     doc_fields
-        Reference to a list of column names to be indexed from doc_table
+         doc_fields => \@doc_fields
+
+        An arrayref of fields contained in the index. If using "add_doc()",
+        lists column names to be indexed in "doc_table".
 
     doc_id_field
-        Name of a unique integer key column in doc_table
+         doc_id_field => $doc_id_field
 
-    index_dbh
-        DBI connection handle to database containing TextIndex tables. Using
-        a separate database for your TextIndex is recommended, because the
-        module creates and drops tables without warning.
-
-    collection
-        A name for the index. Should contain only alpha-numeric characters
-        or underscores [A-Za-z0-9_]
+        Name of an integer key column in "doc_table". Must be a primary or
+        unique key.
 
     proximity_index
-        Newer compressed proximity index is turned on by default as of
-        version 0.22.
+         proximity_index => 1
 
-                "some phrase"~2 => matches "some nice phrase"
-                "some phrase"~1 => matches only exact "some phrase"
-                "some phrase"~10 => matches "some [1..9 words] phrase"
-
-                Defaults to ~1 when omitted.
-
-        The proximity matches work only forwards, not backwards, that means:
-
-                "some phrase"~3 does not match "phrase nice some" or "phrase some"
-
-    db  In past versions, the database driver name was passed in this
-        argument. As of version 0.22, the driver name is read from the
-        database handle passed to index_dbh.
+        Enables index structure to support phrase and proximity searches.
+        Default is on (1), pass 0 to turn off.
 
     errors
-        This hash reference can be used to override default error messages.
-        Please refer to the SYNOPSIS for meaning of the particular keys and
-        values.
+         errors => {
+             empty_query => "your query was empty",
+             quote_count => "phrases must be quoted correctly",
+             no_results => "your seach did not produce any results",
+             no_results_stop => "no results, these words were stoplisted: ",
+             wildcard_length =>
+                    "Use at least one letter or number at the beginning " .
+                    "of the word before wildcard characters.",
+             wildcard_expansion =>
+                "The wildcard term you used was too broad, " .
+                "please use more characters before or after the wildcard",
+         }
 
-    charset Default is 'iso-8859-1'.
+        This hash reference can be used to override default error messages.
+
+    charset
+         charset => 'iso-8859-1'
+
+        Default is 'iso-8859-1'.
+
         Accented characters are converted to ASCII equivalents based on the
         charset.
 
         Pass 'iso-8859-2' for Czech or other Slavic languages.
 
+        Only iso-8859-1 and iso-8859-2 have been tested.
+
     stoplist
+         stoplist => [ 'en' ]
+
         Activates stoplisting of very common words that are present in
-        almost every document. Default is not to use stoplisting. Value of
+        almost every document. Default is to not use stoplisting. Value of
         the parameter is a reference to array of two-letter language codes
         in lower case. Currently only two stoplists exist:
 
-                en => English
-                cz => Czech
+         en - English
+         cz - Czech
+
+        Stoplisting is usually not recommended because certain queries
+        containing common words cannot be resolved, such as: "The Who" or
+        "To be or not to be." DBIx::TextIndex is optimized well enough that
+        the performance gains from stoplisting are minimal.
 
     max_word_length
+         max_word_length => 20
+
         Specifies maximum word length resolution. Defaults to 20 characters.
 
     phrase_threshold
-        Defaults to 1000 documents.
+         phrase_threshold => 1000
+
+        If "proximity_index" is turned off, and documents were indexed with
+        "add_doc()", and "doc_dbh" is available, some phrase queries can be
+        resolved by scanning the original document rows with a LIKE
+        '%phrase%' query. The phrase threshold is the maximum number of rows
+        that will be scanned.
+
+        It is recommended that the "proximity_index" option always be used,
+        because it is more efficient than scanning rows, and it is not
+        limited to documents added using "add_doc()".
 
     decode_html_entities
+         decode_html_entities => 1
+
         Decode html entities before indexing documents (e.g. &amp; -> &).
         Default is 1.
 
     print_activity
+         print_activity => 0
+
         Activates STDOUT debugging. Higher value increases verbosity.
+
+    update_commit_interval
+         update_commit_interval => 20000
+
+        When indexing a large number of documents using "add_doc()" or
+        "add()" inside a "begin_add()" / "commit_add()" block, this setting
+        will trigger an automatic commit to the database when the number of
+        added documents exceeds this number.
+
+        Setting this higher will increase indexing speed, but also increase
+        memory usage. In tests, the default setting of 20000 when indexing
+        10KB documents results in about 500MB of memory used.
+
+    doc_key_sql_type
+         doc_key_sql_type => varchar
+
+        SQL datatype to store doc keys, defaults to varchar. If only numeric
+        keys are required, this could be changed to an integer type for more
+        compact storage.
+
+    doc_key_length
+         doc_key_length => 200
+
+        The maximum length of a doc_key.
 
     After creating a new TextIndex for the first time, and after calling
     initialize(), only the index_dbh, doc_dbh, and collection arguments are
     needed to create subsequent instances of a TextIndex.
 
-  $index->initialize
-    This method creates all the inverted tables for the TextIndex in the
-    database specified by doc_dbh. This method should be called only once
-    when creating a new index! It drops all the inverted tables before
-    creating new ones.
+  "initialize()"
+     $index->initialize()
 
-    initialize() also stores the doc_table, doc_fields, doc_id_field,
-    char_set, stoplist, error attributes, proximity_index, max_word_length,
-    phrase_threshold and min_wildcard_length preferences in a special table
-    called "collection," so subsequent calls to new() for a given collection
-    do not need those arguments.
+    This method creates all the inverted tables for DBIx::TextIndex in the
+    database specified by index_dbh. This method should be called only once
+    when creating an index for the first time. It drops all the inverted
+    tables before creating new ones.
 
-    Calling initialize() will upgrade the collection table created by
+    "initialize()" also stores the "doc_table", "doc_fields",
+    "doc_id_field", "char_set", "stoplist", "error" attributes,
+    "proximity_index", "max_word_length", "phrase_threshold" and
+    "min_wildcard_length" preferences in a special table called
+    "collection," so subsequent calls to "new()" for a given collection do
+    not need those arguments.
+
+    Calling "initialize()" will upgrade the collection table created by
     earlier versions of DBIx::TextIndex if necessary.
 
-  $index->upgrade_collection_table
-    Upgrades the collection table to the latest format. Usually does not
-    need to be called by the programmer, because initialize() handles
-    upgrades automatically.
+  "add()"
+     $index->add($doc_key, \%doc_fields)
 
-  $index->add_doc(\@doc_ids)
-    Add all the @docs_ids from doc_id_field to the TextIndex. All further
-    calls to add_doc() must use @doc_ids higher than those previously added
-    to the index. Reindexing previously-indexed documents will yield
-    unpredictable results!
+    Indexes a document represented by hashref, where the keys of the hash
+    are field names and the values are strings to be indexed. When
+    "search()" is called, and a hit for that document is scored, $doc_key
+    will be returned in the search results.
 
-  $index->remove_doc(\@doc_ids)
-    This method accepts a reference to an array of doc ids as its parameter.
-    The specified documents will be removed from the index, but not from the
-    actual documents table that is being indexed. The documents itself must
-    be accessible when you remove them from the index. The ids should be
-    sorted from lowest to highest.
+  "begin_add()"
+    Before performing a large number of <add()> operations in a loop, call
+    "begin_add()" to delay writing to the database until "commit_add()" is
+    called. If "begin_add()" is not called, "add()" will run in an
+    "autocommit" mode.
 
-    It's actually not possible to completely recover the space taken by the
-    documents that are removed, therefore it's recommended to rebuild the
-    index when you remove a significant amount of documents.
+    Has no effect if using "add_doc()" method instead of "add()".
 
-  $index->search(\%search_args)
-    search() returns $results, a hash reference. The keys of the hash are
+    The "update_commit_interval" parameter defines an upper limit on the
+    number of documents held in memory before being committed to the
+    database. If the limit is reached, the changes to the index will be
+    comitted at that point.
+
+  "commit_add()"
+    Commits a group of "add()" operations to the database. It is only
+    necessary to call this if "begin_add()" was called first.
+
+  "add_doc()"
+     $index->add_doc(\@doc_ids)
+
+    Adds all the @docs_ids matching rows with "doc_id_field" from
+    "doc_table" to the index. Reads from the database handle specified by
+    "doc_dbh".
+
+    If @doc_ids references documents that are already indexed, those
+    documents will be re-indexed.
+
+  "remove()"
+     $index->remove(\@doc_keys)
+
+    @doc_keys can be a list of doc keys originally passed to "add()" or the
+    numeric doc ids used for "add_doc()".
+
+    The disk space used for the removed doc keys is not recovered, so an
+    index rebuild is recommended after a significant amount of documents are
+    removed.
+
+  "search()"
+     $results = $index->search(\%args)
+
+    "search()" returns $results, a hash reference. The keys of the hash are
     doc ids, and the values are the relative scores of the documents. If an
     error occured while searching, search will throw a
     DBIx::TextIndex::Exception::Query object.
@@ -207,7 +437,9 @@ DESCRIPTION
          print "The score for $doc_id is $results->{$doc_id}\n";
      }
 
-  $index->unscored_search(\%search_args)
+  "unscored_search()"
+     $doc_keys = $index->unscored_search(\%args)
+
     unscored_search() returns $doc_ids, a reference to an array. Since the
     scoring algorithm is skipped, this method is much faster than search().
     A DBIx::TextIndex::Exception::Query object will be thrown if the query
@@ -231,22 +463,32 @@ DESCRIPTION
          map { print "$_\n" } @$doc_ids;
      }
 
-  @doc_ids = $index->all_docs_ids
-    all_doc_ids() return a list of all doc_ids currently in the index.
+  "optimize()"
+    FIXME: Implementation not complete
 
-  $index->stat
+  "delete()"
+     $index->delete()
+
+    "delete()" removes the tables associated with a TextIndex from
+    index_dbh.
+
+  "stat()"
     Allows you to obtain some meta information about the index. Accepts one
     parameter that specifies what you want to obtain.
 
-            $index->stat('total_words')
+     $index->stat('total_words')
 
     Returns a total count of words in the index. This number may differ from
     the total count of words in the documents itself.
 
-  $index->delete
-    delete() removes the tables associated with a TextIndex from index_dbh.
+  "upgrade_collection_table()"
+     $index->upgrade_collection_table()
 
-SUPPORT FOR SEARCH MASKS
+    Upgrades the collection table to the latest format. Usually does not
+    need to be called by the programmer, because initialize() handles
+    upgrades automatically.
+
+BOOLEAN SEARCH MASKS
     DBIx::TextIndex can apply boolean operations on arbitrary lists of doc
     ids to search results.
 
@@ -263,7 +505,9 @@ SUPPORT FOR SEARCH MASKS
     Masks that represent doc ids for in each the three categories can be
     created:
 
-  $index->add_mask($mask_name, \@doc_ids);
+  "add_mask()"
+     $index->add_mask($mask_name, \@doc_ids);
+
      $index->add_mask('green_category', [ 1, 2, 6 ]);
      $index->add_mask('blue_category', [ 3, 5 ]);
      $index->add_mask('red_category', [ 4 ]);
@@ -271,7 +515,7 @@ SUPPORT FOR SEARCH MASKS
     The first argument is an arbitrary string, and the second is a reference
     to any array of doc ids that the mask name identifies.
 
-    mask operations are passed in a second argument hash reference to
+    Mask operations are passed in a second argument hash reference to
     $index->search():
 
      %query_args = (
@@ -287,7 +531,7 @@ SUPPORT FOR SEARCH MASKS
          or_mask_set => [ \@or_mask_list_1, \@or_mask_list_2, ... ],
      );
 
-    $index->search(\%query_args, \%args);
+     $index->search(\%query_args, \%args);
 
     not_mask
         For each mask in the not_mask list, the intersection of the search
@@ -329,109 +573,99 @@ SUPPORT FOR SEARCH MASKS
          $index->search(\%query_args,
                         { or_mask => [ 'blue_category', 'red_category' ] });
 
-  $index->delete_mask($mask_name);
-        Deletes a single mask from the mask table in the database.
+  "delete_mask()"
+     $index->delete_mask($mask_name);
 
-PARTIAL PATTERN MATCHING USING WILDCARDS
-        You can use wildcard characters "*" or "?" at the end of or in the
-        middle of words
+    Deletes a single mask from the mask table in the database.
 
-        Example:
+RESULTS HIGHLIGHTING
+    A module HTML::Highlight can be used either independently or together
+    with DBIx::TextIndex for this task.
 
-            "*" matches zero or more characters
+    The HTML::Highlight module provides a very nice Google-like highligting
+    using different colors for different words or phrases and also can be
+    used to preview a context in which the query words appear in resulting
+    documents.
 
-            car*        ==> "car", "cars", "careful", "cartel", ....
-            ca*r        ==> "car", "career", "caper", "cardiovascular"
+    The module works together with DBIx::TextIndex using its new method
+    html_highlight().
 
-            "?" matches any single character
-
-            car?        ==> "care", "cars", "cart"
-            d?g         ==> "dig", "dog", "dug"
-
-            "+" at the end matches singular or plural form (naively, by
-                 appending an 's' to the word)
-
-            car+        ==> "car", "cars"
-
-        By default, at least 1 alphanumeric character must appear before the
-        first wildcard character. The option min_wildcard_length can changed
-        to require more alphanumeric characters before the first wildcard.
-
-        The option max_wildcard_term_expansion specifies the maximum number
-        of words a wildcard term can expand to before throwing a query
-        exception. The default is 30 words.
-
-HIGHLIGHTING OF QUERY WORDS OR PATTERNS IN RESULTING DOCUMENTS
-        A module HTML::Highlight can be used either independently or
-        together with DBIx::TextIndex for this task.
-
-        The HTML::Highlight module provides a very nice Google-like
-        highligting using different colors for different words or phrases
-        and also can be used to preview a context in which the query words
-        appear in resulting documents.
-
-        The module works together with DBIx::TextIndex using its new method
-        html_highlight().
-
-        Check example script 'html_search.cgi' in the 'examples/' directory
-        of DBIx::TextIndex distribution or refer to the documentation of
-        HTML::Highlight for more information.
+    Check example script 'html_search.cgi' in the 'examples/' directory of
+    DBIx::TextIndex distribution or refer to the documentation of
+    HTML::Highlight for more information.
 
 AUTHOR
-        Daniel Koch, dkoch@bizjournals.com.
+    Daniel Koch, dkoch@bizjournals.com.
 
 COPYRIGHT
-        Copyright 1997-2004 by Daniel Koch. All rights reserved.
+    Copyright 1997-2004 by Daniel Koch. All rights reserved.
 
 LICENSE
-        This package is free software; you can redistribute it and/or modify
-        it under the same terms as Perl itself, i.e., under the terms of the
-        "Artistic License" or the "GNU General Public License".
+    This package is free software; you can redistribute it and/or modify it
+    under the same terms as Perl itself, i.e., under the terms of the
+    "Artistic License" or the "GNU General Public License".
 
 DISCLAIMER
-        This package is distributed in the hope that it will be useful, but
-        WITHOUT ANY WARRANTY; without even the implied warranty of
-        MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+    This package is distributed in the hope that it will be useful, but
+    WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
-        See the "GNU General Public License" for more details.
+    See the "GNU General Public License" for more details.
 
 ACKNOWLEDGEMENTS
-        Thanks to Jim Blomo, for PostgreSQL patches.
+    Thanks to Jim Blomo, for PostgreSQL patches.
 
-        Thanks to the lucy project (http://www.seg.rmit.edu.au/lucy/) for
-        ideas and code for the Okapi scoring function.
+    Thanks to the lucy project (http://www.seg.rmit.edu.au/lucy/) for ideas
+    and code for the Okapi scoring function.
 
-        Simon Cozens' Lucene::QueryParser module was adapted to create the
-        DBIx::TextIndex QueryParser module.
+    Simon Cozens' Lucene::QueryParser module was adapted to create the
+    DBIx::TextIndex QueryParser module.
 
-        Special thanks to Tomas Styblo, for first version of proximity
-        index, Czech language support, stoplists, highlighting, document
-        removal and many other improvements.
+    Special thanks to Tomas Styblo, for first version of proximity index,
+    Czech language support, stoplists, highlighting, document removal and
+    many other improvements.
 
-        Thanks to Ulrich Pfeifer for ideas and code from Man::Index module
-        in "Information Retrieval, and What pack 'w' Is For" article from
-        The Perl Journal vol. 2 no. 2.
+    Thanks to Ulrich Pfeifer for ideas and code from Man::Index module in
+    "Information Retrieval, and What pack 'w' Is For" article from The Perl
+    Journal vol. 2 no. 2.
 
-        Thanks to Steffen Beyer for the Bit::Vector module, which enables
-        fast set operations in this module. Version 5.3 or greater of
-        Bit::Vector is required by DBIx::TextIndex.
+    Thanks to Steffen Beyer for the Bit::Vector module, which enables fast
+    set operations in this module. Version 5.3 or greater of Bit::Vector is
+    required by DBIx::TextIndex.
 
 BUGS
-        Documentation is not complete.
+    Documentation is not complete.
 
-        Please feel free to email me (dkoch@bizjournals.com) with any
-        questions or suggestions.
+    Please feel free to email me (dkoch@bizjournals.com) with any questions
+    or suggestions.
 
 SEE ALSO
-        perl(1).
+    perl(1).
+
 
 Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.24
+    WARNING: indexes must be recreated, format has changed
+
+    Ability to reindex existing documents
+
+    New methods add(), begin_add(), commit_add() with support for arbitrary
+    keys and indexing of data from sources other than a database table
+
+    Made individual database drivers subclasses of DBIx::TextIndex::DBD
+    for easier porting. A new driver can override selected database-specific
+    methods instead of having to rewrite all methods.
+
+    Check for division by zero in _resolve_plural()
+
+    Bug fix for pathological case where only query term is a NOT term
+
 0.23
 
-    Added support for SQLite
+    SQLite support
 
     Changed wildcard syntax slightly: a '?' character matches any
     single character.  A '+' at the end of a word behaves like the '?'

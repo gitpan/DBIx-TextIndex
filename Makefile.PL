@@ -6,7 +6,7 @@ WriteMakefile(
     'VERSION_FROM' => 'lib/DBIx/TextIndex.pm',
     'PREREQ_PM'    => {
                          'Bit::Vector'      => 6.3,
-			 'DBI'              => 1.42,
+			 'DBI'              => 1.43,
 			 'HTML::Entities'   => 1.22,
 			 'Exception::Class' => 1.12,
                          'Text::Balanced'   => 1.83,

@@ -28,7 +28,7 @@ ok( ref $index eq 'DBIx::TextIndex' );
 
 my $results;
 
-my @top_docs  = (76, 3, 2, 0, 76, 105, 2, 2, 2, 13, 0, 13, 6, 6, 6);
+my @top_docs  = (76, 3, 2, 0, 76, 105, 2, 2, 2, 13, 0, 13, 6, 6, 6, 0, 0);
 
 my @terms = ('isle',
 	     'greedy',
@@ -45,6 +45,8 @@ my @terms = ('isle',
 	     '"Lake Erie"~1',
 	     '"LAKE ERIE"~1',
 	     '"lake erie"~1',
+	     '-isle',
+	     '-isle',
              );	
 
 my @result_docs_okapi;

@@ -2,9 +2,25 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.24
+    WARNING: indexes must be recreated, format has changed
+
+    Ability to reindex existing documents
+
+    New methods add(), begin_add(), commit_add() with support for arbitrary
+    keys and indexing of data from sources other than a database table
+
+    Made individual database drivers subclasses of DBIx::TextIndex::DBD
+    for easier porting. A new driver can override selected database-specific
+    methods instead of having to rewrite all methods.
+
+    Check for division by zero in _resolve_plural()
+
+    Bug fix for pathological case where only query term is a NOT term
+
 0.23
 
-    Added support for SQLite
+    SQLite support
 
     Changed wildcard syntax slightly: a '?' character matches any
     single character.  A '+' at the end of a word behaves like the '?'

@@ -2,82 +2,85 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.23';
+our $VERSION = '0.24';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
 
 use Bit::Vector ();
 use Carp qw(carp croak);
-use DBIx::TextIndex::Exception;
+use DBIx::TextIndex::Exception qw(:all);
 use DBIx::TextIndex::QueryParser;
 use DBIx::TextIndex::TermDocsCache;
 use HTML::Entities ();
-
+use Data::Dumper;
 my $unac;
 BEGIN {
     eval { require Text::Unaccent; import Text::Unaccent qw(unac_string) };
     $unac = $@ ? 0 : 1;
 }
 use constant DO_UNAC => $unac;
-
-my $GEN = 'DBIx::TextIndex::Exception::General';
-my $DA  = 'DBIx::TextIndex::Exception::DataAccess';
-my $QRY = 'DBIx::TextIndex::Exception::Query';
-
-my $ME  = 'DBIx::TextIndex"';
+use constant COLLECTION_NAME_MAX_LENGTH => 100;
 
 # Version number when collection table definition last changed
-my $LAST_COLLECTION_TABLE_UPGRADE = '0.23';
+use constant LAST_COLLECTION_TABLE_UPGRADE => 0.24;
 
 # Largest size word to be indexed
-my $MAX_WORD_LENGTH = 20;
+use constant MAX_WORD_LENGTH => 20;
 
 # Minimum number of alphanumeric characters in a term before a wildcard
-my $MIN_WILDCARD_LENGTH = 1;
+use constant MIN_WILDCARD_LENGTH => 1;
 
 # Maximum number of words a wildcard term can expand to
-my $MAX_WILDCARD_TERM_EXPANSION = 30;
+use constant MAX_WILDCARD_TERM_EXPANSION => 30;
 
  # Used to screen stop words from the scoring process
-my $IDF_MIN_OKAPI        = -1.8;
+use constant IDF_MIN_OKAPI => -1.8;
 
 # What can be considered too many results, NO LONGER USED
-my $RESULT_THRESHOLD = 5000;
+use constant RESULT_THRESHOLD => 5000;
 
 # Document score accumulator, higher numbers increase scoring accuracy
 # but use more memory and cpu
-my $ACCUMULATOR_LIMIT = 20000;
+use constant ACCUMULATOR_LIMIT => 20000;
 
 # Clear out the hash key caches after this many searches
-my $SEARCH_CACHE_FLUSH_INTERVAL = 1000;
+use constant SEARCH_CACHE_FLUSH_INTERVAL => 1000;
 
 # Practical number of rows RDBMS can scan in acceptable amount of time
-my $PHRASE_THRESHOLD = 1000;
+use constant PHRASE_THRESHOLD => 1000;
+
+# Charset of data to be indexed
+use constant CHARSET => 'iso-8859-1';
+
+# SQL datatype to store document keys
+use constant DOC_KEY_SQL_TYPE => 'varchar';
+
+# Maximum length of above key
+use constant DOC_KEY_LENGTH => '200';
+
 
 my %ERROR = (
-    empty_query        => "You must be searching for something!",
-    quote_count        => "Quotes must be used in matching pairs.",
-    no_results         => "Your search did not produce any matching documents.",
-    no_results_stop    => "Your search did not produce any matching " .
+    empty_query       => "You must be searching for something!",
+    quote_count       => "Quotes must be used in matching pairs.",
+    no_results        => "Your search did not produce any matching documents.",
+    no_results_stop   => "Your search did not produce any matching " .
         "documents. These common words were not included in the search:",
 
-    wildcard_length    => $MIN_WILDCARD_LENGTH > 1
+    wildcard_length   => MIN_WILDCARD_LENGTH > 1
 	 ?
-	    "Use at least $MIN_WILDCARD_LENGTH letters or " .
+	    "Use at least " . MIN_WILDCARD_LENGTH . " letters or " .
 	    "numbers at the beginning of the word before wildcard characters."
 	 :
-	    "Use at least $MIN_WILDCARD_LENGTH letter or " .
-	    "number at the beginning of the word before wildcard characters.",
+	    "Use at least one letter or number at the beginning of the word " .
+	    "before wildcard characters.",
     wildcard_expansion => "The wildcard term you used was too broad, " .
 	"please use more characters before or after the wildcard",
 	     );
 
-my $COLLECTION_TABLE = 'collection';
+my @MASK_TYPES = qw(and_mask or_mask not_mask);
 
-my @MASK_TYPE = qw(and_mask or_mask not_mask);
-
-my $CHARSET_DEFAULT = 'iso-8859-1';
+use constant COLLECTION_TABLE => 'collection';
 
 my @COLLECTION_FIELDS = qw(
     collection
@@ -112,7 +115,7 @@ my %COLLECTION_FIELD_DEFAULT = (
     doc_table => '',
     doc_id_field => '',
     doc_fields => '',
-    charset => $CHARSET_DEFAULT,
+    charset => CHARSET,
     stoplist => '',
     proximity_index => '1',
     error_quote_count => $ERROR{quote_count},
@@ -121,11 +124,11 @@ my %COLLECTION_FIELD_DEFAULT = (
     error_no_results_stop => $ERROR{no_results_stop},
     error_wildcard_length => $ERROR{wildcard_length},
     error_wildcard_expansion => $ERROR{wildcard_expansion},
-    max_word_length => $MAX_WORD_LENGTH,
-    result_threshold => $RESULT_THRESHOLD,
-    phrase_threshold => $PHRASE_THRESHOLD,
-    min_wildcard_length => $MIN_WILDCARD_LENGTH,
-    max_wildcard_term_expansion => $MAX_WILDCARD_TERM_EXPANSION,
+    max_word_length => MAX_WORD_LENGTH,
+    result_threshold => RESULT_THRESHOLD,
+    phrase_threshold => PHRASE_THRESHOLD,
+    min_wildcard_length => MIN_WILDCARD_LENGTH,
+    max_wildcard_term_expansion => MAX_WILDCARD_TERM_EXPANSION,
     decode_html_entities => '1',
     scoring_method => 'okapi',
     update_commit_interval => 20000,
@@ -141,18 +144,26 @@ sub new {
     my $class = ref($pkg) || $pkg;
     my $self = bless {}, $class;
 
-    $self->{COLLECTION_TABLE} = $COLLECTION_TABLE;
     $self->{COLLECTION_FIELDS} = \@COLLECTION_FIELDS;
 
-    foreach my $arg ('collection', 'index_dbh', 'doc_dbh') {
+    foreach my $arg ('collection', 'index_dbh') {
 	if ($args->{$arg}) {
 	    $self->{uc $arg} = $args->{$arg};
 	} else {
-	    throw $GEN( error => "new $pkg needs $arg argument" );
+	    throw_gen( error => "new $pkg needs $arg argument" );
 	}
     }
 
     my $coll = $self->{COLLECTION};
+
+    if ($args->{doc_dbh}) {
+	$self->{DOC_DBH} = $args->{doc_dbh};
+    }
+
+    # deprecated arguments
+    if ($args->{db}) {
+	throw_gen( error => "new $pkg no longer needs 'db' argument" );
+    }
 
     # term_docs field can have character 32 at end of string,
     # so DBI ChopBlanks must be turned off
@@ -163,16 +174,23 @@ sub new {
     $PA = $self->{PRINT_ACTIVITY};
 
     $args->{dbd} = $self->{INDEX_DBH}->{Driver}->{Name};
-    my $dbd = 'DBIx/TextIndex/DBD/' . $args->{dbd} . '.pm';
-    eval { require "$dbd" };
-    die "Unsupported DBD driver: $dbd ($@)" if $@;
+    my $dbd_class = 'DBIx::TextIndex::DBD::' . $args->{dbd};
+    eval "require $dbd_class";
+    throw_gen( error => "Unsupported DBD driver: $dbd_class",
+	       detail => $@ ) if $@;
+    $self->{DB} = $dbd_class->new({
+	index_dbh => $self->{INDEX_DBH},
+	collection_table => COLLECTION_TABLE,
+	collection_fields => $self->{COLLECTION_FIELDS},
+    });
 
-    $self->{DBD} = $args->{dbd};
+    $self->{DBD_TYPE} = $args->{dbd};
 
     unless ($self->_fetch_collection_info) {
 	$self->{DOC_TABLE} = $args->{doc_table};
 	$self->{DOC_FIELDS} = $args->{doc_fields};
 	$self->{DOC_ID_FIELD} = $args->{doc_id_field};
+
     	$self->{STOPLIST} = $args->{stoplist};
 
 	# override default error messages
@@ -199,7 +217,9 @@ sub new {
     $self->{CZECH_LANGUAGE} = $self->{CHARSET} eq 'iso-8859-2' ? 1 : 0;
     $self->{MASK_TABLE} = $coll . '_mask';
     $self->{DOCWEIGHTS_TABLE} = $coll . '_docweights';
-    $self->{ALL_DOCS_VECTOR_TABLE} = $coll . "_all_docs_vector";
+    $self->{ALL_DOCS_VECTOR_TABLE} = $coll . '_all_docs_vector';
+    $self->{DELETE_QUEUE_TABLE} = $coll . '_delete_queue';
+    $self->{DOC_KEY_TABLE} = $coll . '_doc_key';
 
     # Field number, assign each field a number 0 .. N
     my $fno = 0;
@@ -225,15 +245,31 @@ sub new {
     }
     $self->{STOPLISTED_QUERY} = [];
 
+    # Database driver object
+    $self->{DB}->set({
+	all_docs_vector_table => $self->{ALL_DOCS_VECTOR_TABLE},
+	delete_queue_table => $self->{DELETE_QUEUE_TABLE},
+	doc_table => $self->{DOC_TABLE},
+	doc_fields => $self->{DOC_FIELDS},
+	doc_id_field => $self->{DOC_ID_FIELD},
+	docweights_table => $self->{DOCWEIGHTS_TABLE},
+	doc_key_table => $self->{DOC_KEY_TABLE},
+	mask_table => $self->{MASK_TABLE},
+	max_word_length => $self->{MAX_WORD_LENGTH},
+	doc_key_sql_type => $args->{doc_key_sql_type} || DOC_KEY_SQL_TYPE,
+	doc_key_length => exists $args->{doc_key_length} ?
+	    $args->{doc_key_length} : DOC_KEY_LENGTH,
+    });
 
     # Cache for term_doc postings
     $self->{C} = DBIx::TextIndex::TermDocsCache->new({
-	dbd => $args->{dbd},
-	dbh => $self->{INDEX_DBH},
+	db => $self->{DB},
+	index_dbh => $self->{INDEX_DBH},
         max_indexed_id => $self->max_indexed_id,
 	inverted_tables => $self->{INVERTED_TABLES},
     });
 
+    # Query parser object 
     $self->{QP} = DBIx::TextIndex::QueryParser->new({ charset => $self->{CHARSET} });
 
     # Number of searches performed on this instance
@@ -242,23 +278,24 @@ sub new {
 }
 
 sub add_mask {
-
     my $self = shift;
     my $mask = shift;
-    my $ids = shift;
+    my $doc_keys = shift;
+
+    my $ids = $self->{DB}->fetch_doc_ids($doc_keys);
 
     my $max_indexed_id = $self->max_indexed_id;
 
     # Trim ids from end instead here.
     if ($ids->[-1] > $max_indexed_id) {
-	throw $GEN( error => "Greatest doc_id ($ids->[-1]) in mask ($mask) is larger than greatest doc_id in index" );
+	throw_gen( error => "Greatest doc_id ($ids->[-1]) in mask ($mask) is larger than greatest doc_id in index" );
     }
 
     my $vector = Bit::Vector->new($max_indexed_id + 1);
     $vector->Index_List_Store(@$ids);
 
     print "Adding mask ($mask) to table $self->{MASK_TABLE}\n" if $PA > 1;
-    $self->db_add_mask($mask, $vector->to_Enum);
+    $self->{DB}->add_mask($mask, $vector->to_Enum);
     return 1;
 }
 
@@ -266,7 +303,7 @@ sub delete_mask {
     my $self = shift;
     my $mask = shift;
     print "Deleting mask ($mask) from table $self->{MASK_TABLE}\n" if $PA > 1;
-    $self->{INDEX_DBH}->do($self->db_delete_mask, undef, $mask);
+    $self->{INDEX_DBH}->do($self->{DB}->delete_mask, undef, $mask);
 }
 
 # Stub method for older deprecated name
@@ -274,86 +311,165 @@ sub add_document { shift->add_doc(@_) }
 
 sub add_doc {
     my $self = shift;
-    my @ids = @_;
+    my @keys = @_;
 
-    my $ids;
-    if (ref $ids[0] eq 'ARRAY') {
-	$ids = $ids[0];
-    } elsif ($ids[0] =~ m/^\d+$/) {
-	$ids = \@ids;
+    throw_gen( error => 'add_doc() needs doc_dbh to be defined' ) unless
+	defined $self->{DOC_DBH};
+
+    my $keys;
+    if (ref $keys[0] eq 'ARRAY') {
+	$keys = $keys[0];
+    } elsif ($keys[0] =~ m/^\d+$/) {
+	$keys = \@keys;
     }
 
-    return if $#$ids < 0;
+    return if $#$keys < 0;
 
-    my $add_count = $#$ids + 1;
-    print "Adding $add_count docs\n" if $PA;
-
-    my @sort_ids = sort { $a <=> $b } @$ids;
+    my $add_count_guess = $#$keys + 1;
+    my $add_count = 0;
+    print "Adding $add_count_guess docs\n" if $PA;
 
     my @added_ids;
     my $batch_count = 0;
 
-    my $do_prox = $self->{PROXIMITY_INDEX};
-
-    foreach my $doc_id (@sort_ids) {
-	print $doc_id if $PA;
-	unless ($self->_ping_doc($doc_id)) {
-	    print " skipped, no doc $doc_id found\n";
+    foreach my $doc_key (@$keys) {
+	unless ($self->_ping_doc($doc_key)) {
+	    print "$doc_key skipped, no doc $doc_key found\n";
 	    next;
 	}
 
-	foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
-	    print " field$fno" if $PA;
-	    my %positions;
-	    my %frequency;
-	    my @terms = $self->_words($self->_fetch_doc($doc_id,
-				      $self->{DOC_FIELDS}->[$fno]));
-
-	    # word count
-	    my $wc = 1;
-	    foreach my $term (@terms) {
-		push @{$positions{$term}}, $wc if $do_prox;
-		$frequency{$term}++;
-		$wc++;
-	    }
-	    print " $wc" if $PA;
-	    while (my ($term, $frequency) = each %frequency) {
-		$self->_docs($fno, $term, $doc_id, $frequency);
-		$self->_positions($fno, $term, $positions{$term}) if $do_prox;
-	    }
-	    # Doc weight
-	    $self->{NEW_W_D}->[$fno]->[$doc_id] = $wc ?
-		sprintf("%.5f", sqrt((1 + log($wc))**2)) : 0;
-	} # end of field indexing
-	print "\n" if $PA;
+	my $doc_id =
+	    $self->_add_one($doc_key, $self->_fetch_doc_all_fields($doc_key));
 
 	push @added_ids, $doc_id;
+	$add_count++;
 	$batch_count++;
 	if ($self->{UPDATE_COMMIT_INTERVAL}
 	    && $batch_count >= $self->{UPDATE_COMMIT_INTERVAL}) {
 	    # Update database
-	    $self->{OLD_MAX_INDEXED_ID} = $self->max_indexed_id;
-	    $self->max_indexed_id($added_ids[-1]);
-	    $self->all_doc_ids(@added_ids);
-	    $self->_commit_docs;
+	    $self->_commit_docs(\@added_ids);
 	    $batch_count = 0;
 	    @added_ids = ();
 	}
 
     }	# end of doc indexing
 
+
     # Update database
-    $self->{OLD_MAX_INDEXED_ID} = $self->max_indexed_id;
-    $self->max_indexed_id($sort_ids[-1]);
-    $self->all_doc_ids(@added_ids);
-    $self->_commit_docs;
+    $self->_commit_docs(\@added_ids);
     return $add_count;
 }
 
-# Stub method for older deprecated name
-sub remove_document { shift->remove_doc(@_) }
+sub _add_one {
+    my $self = shift;
+    my ($doc_key, $doc_fields) = @_;
 
-sub remove_doc {
+    my $doc_id = $self->{DB}->fetch_doc_id($doc_key);
+    if (defined $doc_id) {
+	# FIXME: need optimization if more than one doc is replaced at once
+	print "Replacing doc $doc_key\n" if $PA;
+	$self->_remove($doc_id);
+    } 
+    $doc_id = $self->{DB}->insert_doc_key($doc_key);
+
+    my $do_prox = $self->{PROXIMITY_INDEX};
+
+    print "$doc_key - $doc_id" if $PA;
+
+    foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
+	my $field = $self->{DOC_FIELDS}->[$fno];
+	print " $field" if $PA;
+
+	my %positions;
+	my %frequency;
+
+	my @terms = $self->_terms($doc_fields->{$field});
+
+	# term count
+	my $tc = 1;
+	foreach my $term (@terms) {
+	    push @{$positions{$term}}, $tc if $do_prox;
+	    $frequency{$term}++;
+	    $tc++;
+	}
+	print " $tc" if $PA;
+	while (my ($term, $frequency) = each %frequency) {
+	    $self->_docs($fno, $term, $doc_id, $frequency);
+	    $self->_positions($fno, $term, $positions{$term}) if $do_prox;
+	}
+	# Doc weight
+	$self->{NEW_W_D}->[$fno]->[$doc_id] = $tc ?
+	    sprintf("%.5f", sqrt((1 + log($tc))**2)) : 0;
+    } # end of field indexing
+    print "\n" if $PA;
+    return $doc_id;
+}
+
+sub add {
+    my $self = shift;
+
+    my $add_count = 0;
+    unless ($self->{IN_ADD_TRANSACTION}) {
+	$self->{ADD_BATCH_COUNT} = 0;
+	$self->{ADDED_IDS} = [];
+    }
+
+    while (my ($doc_key, $doc_fields) = splice(@_, 0, 2)) {
+	my $doc_id = $self->_add_one($doc_key, $doc_fields);
+	push @{$self->{ADDED_IDS}}, $doc_id;
+	$add_count++;
+	$self->{ADD_BATCH_COUNT}++;
+	if ($self->{UPDATE_COMMIT_INTERVAL}
+	    && $self->{ADD_BATCH_COUNT} >= $self->{UPDATE_COMMIT_INTERVAL}) {
+	    # Update database
+	    $self->_commit_docs();
+	    $self->{ADD_BATCH_COUNT} = 0;
+	    $self->{ADDED_IDS} = [];
+	}
+    }
+
+    # Update database
+    unless ($self->{IN_ADD_TRANSACTION}) {
+	$self->_commit_docs();
+	delete($self->{ADDED_IDS});
+    }
+    return $add_count;
+}
+
+sub begin_add {
+    my $self = shift;
+    $self->{IN_ADD_TRANSACTION} = 1;
+    $self->{ADD_BATCH_COUNT} = 0;
+    $self->{ADDED_IDS} = [];
+}
+
+sub commit_add {
+    my $self = shift;
+    $self->_commit_docs();
+    delete($self->{ADDED_IDS});
+    $self->{IN_ADD_TRANSACTION} = 0;
+}
+
+# Stub methods for older deprecated names
+sub remove_document { shift->remove(@_) }
+sub remove_doc { shift->remove(@_) }
+
+sub remove {
+    my $self = shift;
+    my @doc_keys = @_;
+
+    my $doc_keys;
+    if (ref $doc_keys[0] eq 'ARRAY') {
+	$doc_keys = $doc_keys[0];
+    } elsif ($doc_keys[0] =~ m/^\d+$/) {
+	$doc_keys = \@doc_keys;
+    }
+
+    my $doc_ids = $self->{DB}->fetch_doc_ids($doc_keys);
+    return $self->_remove($doc_ids);
+}
+
+sub _remove {
     my $self = shift;
     my @ids = @_;
 
@@ -366,39 +482,19 @@ sub remove_doc {
 
     return if $#$ids < 0;
 
-    if ($PA) {
-	my $remove_count = $#{$ids} + 1;
-	print "Removing $remove_count docs\n";
-    }
-
-    my $total_words = 0;
-    my @remove_words;
-    foreach my $doc_id (@$ids) {
-	print $doc_id if $PA;
-	croak "$ME: doc's content must be accessible to remove a doc"
-	    unless $self->_ping_doc($doc_id);
-	foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
-	    print " field$fno" if $PA;
-	    my @words = $self->_words($self->_fetch_doc($doc_id,
-				      $self->{DOC_FIELDS}->[$fno]));
-	    my %words;
-	    foreach my $word (@words) {
-		$remove_words[$fno]->{$word}++ if (not $words{$word});
-		$words{$word} = 1;
-		$total_words++;
-	    }
-	}	# end of each field
-    }	# end of each doc
+    my $remove_count = $#$ids + 1;
+    print "Removing $remove_count docs\n" if $PA;
 
     print "Removing docs from docweights table\n" if $PA;
     $self->_docweights_remove($ids);
 
-    print "Removing docs from inverted tables\n" if $PA;
-    $self->_inverted_remove($ids, \@remove_words);
-
     $self->_all_doc_ids_remove($ids);
 
-    return $total_words; 	# return count of removed words
+    $self->{DB}->delete_doc_key_doc_ids($ids);
+
+    $self->_add_to_delete_queue($ids);
+
+    return $remove_count; 	# return count of removed ids
 }
 
 sub _docweights_remove {
@@ -409,7 +505,7 @@ sub _docweights_remove {
     my $use_all_fields = 1;
     $self->_fetch_docweights($use_all_fields);
 
-    my $sql = $self->db_update_docweights;
+    my $sql = $self->{DB}->update_docweights;
     my $sth = $self->{INDEX_DBH}->prepare($sql);
     foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	my @w_d = @{$self->{W_D}->[$fno]};
@@ -418,7 +514,7 @@ sub _docweights_remove {
 	}
 	my $packed_w_d = pack 'f*', @w_d;
 	# FIXME: we should update the average, leave it alone for now
-	$self->db_update_docweights_execute(
+	$self->{DB}->update_docweights_execute(
 	    $sth,
 	    $fno,
 	    $self->{AVG_W_D}->[$fno],
@@ -428,90 +524,17 @@ sub _docweights_remove {
     $sth->finish;
 }
 
-sub _inverted_remove {
-    my $self = shift;
-    my $docs_ref = shift;
-    my $words = shift;
-
-    $self->{INDEX_DBH}->begin_work;
-
-    my @docs = @{$docs_ref};
-    foreach my $fno (0..$#{$self->{DOC_FIELDS}}) {
-	my $field = $self->{DOC_FIELDS}->[$fno];
-	my $table = $self->{INVERTED_TABLES}->[$fno];
-	my $sql;
-
-	$sql = $self->db_inverted_replace($table);
-	my $i_sth = $self->{INDEX_DBH}->prepare($sql);
-
-	my $s_sth;
-	unless ($self->{DBD} eq 'SQLite') {
-	    $sql = $self->db_inverted_select($table);
-	    $s_sth = $self->{INDEX_DBH}->prepare($sql);
-	}
-
-	foreach my $word (keys %{$words->[$fno]}) {
-
-	    my ($o_docfreq_t, $o_term_docs, $o_term_pos);
-
-	    $s_sth = $self->{INDEX_DBH}->prepare(
-	                 $self->db_inverted_select($table))
-		if $self->{DBD} eq 'SQLite';
-            $s_sth->execute($word);
-	    $s_sth->bind_columns(\$o_docfreq_t, \$o_term_docs, \$o_term_pos);
-	    $s_sth->fetch;
-	    $s_sth->finish if $self->{DBD} eq 'SQLite';
-
-	    print "inverted_remove: field: $field: word: $word\n" if $PA;
-	    # @docs_all contains a doc id for each word that
-	    # we are removing
-	    my $docfreq_t = $o_docfreq_t - $words->[$fno]->{$word};
-	    print "inverted_remove: old docfreq_t: $o_docfreq_t\n" if $PA;
-	    print "inverted_remove: new docfreq_t: $docfreq_t\n" if $PA;
-
-	    # if new docfreq_t is zero, then we should remove the record
-            # of this word completely
-	    if ($docfreq_t < 1) {
-		my $sql = $self->db_inverted_remove($table);
-                $self->{INDEX_DBH}->do($sql, undef, $word);
-                print qq(inverted_remove: removing "$word" completely\n)
-		    if $PA;
-            	next;
-            }
-
-	    # now we will remove the doc from the "docs" field
-	    my $term_docs = term_docs_arrayref($o_term_docs);
-	    my %delete_doc;
-	    @delete_doc{@docs} = (1) x @docs;
-	    my @new_term_docs;
-	    for (my $i = 0; $i < $#$term_docs ; $i += 2) {
-		next if $delete_doc{$term_docs->[$i]};
-		push @new_term_docs, ($term_docs->[$i], $term_docs->[$i + 1]);
-	    }
-
-	    $self->db_inverted_replace_execute(
-		$i_sth, 
-	        $word,
-		$docfreq_t,
-		pack_term_docs(\@new_term_docs),
-		$o_term_pos
-	    );
-	}
-    }
-    $self->{INDEX_DBH}->commit;
-}
-
 sub stat {
     my $self = shift;
     my $query = shift;
 
     if (lc($query) eq 'total_words') {
-	my $total_words = 0;
+	my $total_terms = 0;
 	foreach my $table (@{$self->{INVERTED_TABLES}}) {
-	    my $sql = $self->db_total_words($table);
-	    $total_words += scalar $self->{INDEX_DBH}->selectrow_array($sql);
+	    my $sql = $self->{DB}->total_terms($table);
+	    $total_terms += scalar $self->{INDEX_DBH}->selectrow_array($sql);
 	}
-	return $total_words;
+	return $total_terms;
     }
 
     return undef;
@@ -534,16 +557,16 @@ sub search {
 
     $self->_flush_cache;
 
-    $self->{OR_WORD_COUNT} = 0;
-    $self->{AND_WORD_COUNT} = 0;
+    $self->{OR_TERM_COUNT} = 0;
+    $self->{AND_TERM_COUNT} = 0;
 
-    throw $QRY( error => $ERROR{empty_query}) unless $query;
+    throw_query( error => $ERROR{empty_query}) unless $query;
 
     my @query_field_nos;
     my %term_field_nos;
     while (my ($field, $query_string) = each %$query) {
 	next unless $query_string =~ m/\S+/;
-	throw $GEN( error => "invalid field ($field) in search()" )
+	throw_gen( error => "invalid field ($field) in search()" )
 	    unless exists $self->{FIELD_NO}->{$field};
 	my $fno = $self->{FIELD_NO}->{$field};
 	$self->{QUERY}->[$fno] = $self->{QP}->parse($query_string);
@@ -551,20 +574,23 @@ sub search {
 	    if ($fld eq '__DEFAULT') {
 		$term_field_nos{$fno}++;
 	    } else {
-		# FIXME: should we throw an exception here?
 		if (exists $self->{FIELD_NO}->{$fld}) {
 		    $term_field_nos{$self->{FIELD_NO}->{$fld}}++;
 		}
+		# FIXME: should we throw a query exception here if $fld
+		# does not exist?
 	    }
 	}
 	push @query_field_nos, $self->{FIELD_NO}->{$field};
     }
 
-    throw $QRY( error => $ERROR{'empty_query'} ) unless $#query_field_nos >= 0;
+    throw_query( error => $ERROR{'empty_query'} )
+	unless $#query_field_nos >= 0;
+
     @{$self->{QUERY_FIELD_NOS}} = sort { $a <=> $b } @query_field_nos;
     @{$self->{TERM_FIELD_NOS}} = sort { $a <=> $b } keys %term_field_nos;
 
-    foreach my $mask_type (@MASK_TYPE) {
+    foreach my $mask_type (@MASK_TYPES) {
 	if ($args->{$mask_type}) {
 	    $self->{MASK}->{$mask_type} = $args->{$mask_type};
 	    foreach my $mask (@{$args->{$mask_type}}) {
@@ -594,9 +620,13 @@ sub search {
     $self->_resolve_mask;
     $self->_boolean_search;
 
+    print "Result Vector:\n";
+    print $self->{RESULT_VECTOR}->to_Enum();
+    print "\n";
+
     if ($args->{unscored_search}) {
 	my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
-	throw $QRY( error => $ERROR{'no_results'} ) if $#result_docs < 0;
+	throw_query( error => $ERROR{'no_results'} ) if $#result_docs < 0;
 	return \@result_docs;
     }
 
@@ -606,7 +636,7 @@ sub search {
     if ($scoring_method eq 'okapi') {
 	$results = $self->_search_okapi;
     } else {
-	throw $GEN( error => "Invalid scoring method $scoring_method, only choice is okapi");
+	throw_gen( error => "Invalid scoring method $scoring_method, only choice is okapi");
     }
     $self->{C}->flush_term_docs;
 
@@ -624,9 +654,14 @@ sub _boolean_search {
 	my $fno = $query_fnos[0];
 	$self->{RESULT_VECTOR} =
 	    $self->_boolean_search_field($fno, $self->{QUERY}->[$fno]);
+
+	print "A:\n";
+	print $self->{RESULT_VECTOR}->to_Enum();
+	print "\n";
+
     } else {
-	my $maxid = $self->max_indexed_id + 1;
-	$self->{RESULT_VECTOR} = Bit::Vector->new($maxid);
+	my $max_id = $self->max_indexed_id + 1;
+	$self->{RESULT_VECTOR} = Bit::Vector->new($max_id);
 	foreach my $fno (@query_fnos) {
 	    my $field_vec =
 		$self->_boolean_search_field($fno, $self->{QUERY}->[$fno]);
@@ -635,7 +670,8 @@ sub _boolean_search {
     }
 
     if ($self->{RESULT_MASK}) {
-	$self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR}, $self->{RESULT_MASK});
+	$self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR},
+					     $self->{RESULT_MASK});
     }
 
     no warnings qw(uninitialized);
@@ -650,6 +686,11 @@ sub _boolean_search {
 	my @freq_sort = sort {$f_t{$a} <=> $f_t{$b}} keys %f_t;
 	$self->{TERMS}->[$fno] = \@freq_sort;
     }
+
+    print "B:\n";
+    print $self->{RESULT_VECTOR}->to_Enum();
+    print "\n";
+
 }
 
 sub _boolean_search_field {
@@ -659,9 +700,12 @@ sub _boolean_search_field {
     my $self = shift;
     my ($field_no, $clauses) = @_;
 
-    my $maxid = $self->max_indexed_id + 1;
+    my $max_id = $self->max_indexed_id + 1;
     my $field_vec = $self->{ALL_DOCS_VECTOR}->Clone;
+
     my @or_vecs;
+
+    my $scorable_clause_count = 0; # Any clause without 'NOT' modifier
 
     foreach my $clause (@$clauses) {
 	my $clause_vec;
@@ -689,7 +733,7 @@ sub _boolean_search_field {
 	}
 
 	# AND/OR terms will be used later in scoring process
-	unless ($clause->{MODIFER} eq 'NOT') {
+	unless ($clause->{MODIFIER} eq 'NOT') {
 	    if ($clause->{TYPE} eq 'PHRASE'
 		|| $clause->{TYPE} eq 'IMPLICITPHRASE') {
 		foreach my $term_clause (@{$clause->{PHRASETERMS}}) {
@@ -701,17 +745,19 @@ sub _boolean_search_field {
 	    } else {
 		push @{$self->{TERMS}->[$fno]}, $clause->{TERM};
 	    }
+	    $scorable_clause_count++;
 	}
 
 	if ($clause->{MODIFIER} eq 'NOT') {
-	    $clause_vec->Flip;
-	    $field_vec->Intersection($field_vec, $clause_vec);
+	    my $not_vec = $clause_vec->Clone;
+	    $not_vec->Flip;
+	    $field_vec->Intersection($field_vec, $not_vec);
 	} elsif ($clause->{MODIFIER} eq 'AND'
 		 || $clause->{CONJ} eq 'AND') {
 	    $field_vec->Intersection($field_vec, $clause_vec);
 	} elsif ($clause->{CONJ} eq 'OR') {
 	    if ($#or_vecs >= 0) {
-		my $all_ors_vec = Bit::Vector->new($maxid);
+		my $all_ors_vec = Bit::Vector->new($max_id);
 		foreach my $or_vec (@or_vecs) {
 		    $all_ors_vec->Union($all_ors_vec, $or_vec);
 		}
@@ -723,9 +769,16 @@ sub _boolean_search_field {
 	    push @or_vecs, $clause_vec;
 	}
     }
+
+    # Handle edge case where we only have NOT words
+    if ($scorable_clause_count <= 0) {
+	$field_vec->Empty;
+	return $field_vec;
+    }
+
     # Take the union of all the OR terms and intersect with result vector
     if ($#or_vecs >= 0) {
-	my $all_ors_vec = Bit::Vector->new($maxid);
+	my $all_ors_vec = Bit::Vector->new($max_id);
 	foreach my $or_vec (@or_vecs) {
 	    $all_ors_vec->Union($all_ors_vec, $or_vec);
 	}
@@ -740,8 +793,8 @@ sub _resolve_phrase {
     my $self = shift;
     my ($fno, $clause) = @_;
     my (@term_docs, @term_pos);
-    my $maxid = $self->max_indexed_id + 1;
-    my $and_vec = Bit::Vector->new($maxid);
+    my $max_id = $self->max_indexed_id + 1;
+    my $and_vec = Bit::Vector->new($max_id);
     $and_vec->Fill;
 
     foreach my $term_clause (@{$clause->{PHRASETERMS}}) {
@@ -765,7 +818,8 @@ sub _resolve_phrase {
     my $phrase_ids;
 
     if ($self->{PROXIMITY_INDEX}) {
-	$phrase_ids = pos_search($and_vec, \@term_docs, \@term_pos, $clause->{PROXIMITY}, $and_vec->Min, $and_vec->Max);
+	$phrase_ids = pos_search($and_vec, \@term_docs, \@term_pos,
+		          $clause->{PROXIMITY}, $and_vec->Min, $and_vec->Max);
     } else {
 	my @and_ids = $and_vec->Index_List_Read;
 	return $and_vec if $#and_ids < 0;
@@ -862,8 +916,8 @@ sub _resolve_plural {
     no warnings qw(uninitialized);
     my $self = shift;
     my ($fno, $term) = @_;
-    my $maxid = $self->max_indexed_id + 1;
-    my $terms_union = Bit::Vector->new($maxid);
+    my $max_id = $self->max_indexed_id + 1;
+    my $terms_union = Bit::Vector->new($max_id);
     my $count = 0;
     my $sum_f_t;
     # FIXME: cheap hack
@@ -878,30 +932,31 @@ sub _resolve_plural {
 	$max_t = $t, $max_f_t = $f_t if $f_t > $max_f_t;
 	$terms_union->Union($terms_union, $self->{C}->vector($fno, $t));
     }
-    $self->{F_T}->[$fno]->{$term} = int($sum_f_t/$count);
+    if ($count) {
+	$self->{F_T}->[$fno]->{$term} = int($sum_f_t/$count);
     # FIXME: need to do a real merge
-    $self->{TERM_DOCS}->[$fno]->{$term} = $self->{C}->term_docs($fno, $max_t);
-
+#    $self->{TERM_DOCS}->[$fno]->{$term} = $self->{C}->term_docs($fno, $max_t);
+    }
     return $terms_union, [$term, $term.'s'];
 }
 
 sub _resolve_wild {
     my $self = shift;
     my ($fno, $term) = @_;
-    my $maxid = $self->max_indexed_id + 1;
+    my $max_id = $self->max_indexed_id + 1;
     my $prefix = (split(/[\*\?]/, $term))[0];
-    throw $QRY( error => $ERROR{wildcard_length} )    
+    throw_query( error => $ERROR{wildcard_length} )    
 	if length($prefix) < $self->{MIN_WILDCARD_LENGTH};
-    my $sql = $self->db_fetch_words($self->{INVERTED_TABLES}->[$fno]);
+    my $sql = $self->{DB}->fetch_terms($self->{INVERTED_TABLES}->[$fno]);
     my $terms = [];
     my $sql_term = $term;
     $sql_term =~ tr/\*\?/%_/;
     $terms = $self->{INDEX_DBH}->selectcol_arrayref($sql, undef, $sql_term);
     # To save resources, check to make sure wildcard search is not too broad
-    throw $QRY( error => $ERROR{wildcard_expansion} )
+    throw_query( error => $ERROR{wildcard_expansion} )
 	if $#$terms + 1 > $self->{MAX_WILDCARD_TERM_EXPANSION};
 
-    my $terms_union = Bit::Vector->new($maxid);
+    my $terms_union = Bit::Vector->new($max_id);
     my $count = 0;
     my $sum_f_t;
     # FIXME: cheap hack
@@ -928,26 +983,25 @@ sub _resolve_wild {
 sub _flush_cache {
     my $self = shift;
 
-    foreach my $field (qw(result_vector
-			  result_mask
-			  valid_mask
-			  mask
-			  mask_fetch_list
-			  mask_vector
-			  terms
-			  f_qt
-			  f_t
-			  term_docs
-    			  term_pos))
-    {
-	delete($self->{uc $field});
-    }
+    my @delete = qw(result_vector
+                    result_mask
+		    valid_mask
+                    mask
+		    mask_fetch_list
+		    mask_vector
+		    terms
+		    f_qt
+		    f_t
+		    term_docs
+    		    term_pos);
+
+    delete @$self{map { uc $_ } @delete};
 
     $self->{STOPLISTED_QUERY} = [];
     # check to see if documents have been added since we last called new()
     my $new_max_indexed_id = $self->fetch_max_indexed_id;
     if (($new_max_indexed_id != $self->{MAX_INDEXED_ID})
-	|| ($self->{SEARCH_COUNT} > $SEARCH_CACHE_FLUSH_INTERVAL)) {
+	|| ($self->{SEARCH_COUNT} > SEARCH_CACHE_FLUSH_INTERVAL)) {
 	# flush things that stick around
 	$self->max_indexed_id($new_max_indexed_id);
 	$self->{C}->max_indexed_id($new_max_indexed_id);
@@ -968,10 +1022,10 @@ sub html_highlight {
 
     my $fno = $self->{FIELD_NO}->{$field};
 
-    my @words = @{$self->{QUERY_HIGHLIGHT}->[$fno]};
-    push (@words, @{$self->{QUERY_PHRASES}->[$fno]});
+    my @terms = @{$self->{QUERY_HIGHLIGHT}->[$fno]};
+    push (@terms, @{$self->{QUERY_PHRASES}->[$fno]});
 
-    return (\@words, $self->{QUERY_WILDCARDS}->[$fno]);
+    return (\@terms, $self->{QUERY_WILDCARDS}->[$fno]);
 }
 
 sub initialize {
@@ -1010,7 +1064,9 @@ sub max_indexed_id {
 
 sub fetch_max_indexed_id {
     my $self = shift;
-    my ($max_indexed_id) = $self->{INDEX_DBH}->selectrow_array($self->db_fetch_max_indexed_id, undef, $self->{COLLECTION});
+    my ($max_indexed_id) = $self->{INDEX_DBH}->selectrow_array(
+                               $self->{DB}->fetch_max_indexed_id,
+                               undef, $self->{COLLECTION} );
     return $max_indexed_id;
 }
 
@@ -1022,37 +1078,44 @@ sub delete {
     $self->_delete_collection_info;
 
     print "Dropping mask table ($self->{MASK_TABLE})\n" if $PA;
-    $self->db_drop_table($self->{MASK_TABLE});
+    $self->{DB}->drop_table($self->{MASK_TABLE});
 
     print "Dropping docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
-    $self->db_drop_table($self->{DOCWEIGHTS_TABLE});
+    $self->{DB}->drop_table($self->{DOCWEIGHTS_TABLE});
 
     print "Dropping docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n"
 	if $PA;
-    $self->db_drop_table($self->{ALL_DOCS_VECTOR_TABLE});
+    $self->{DB}->drop_table($self->{ALL_DOCS_VECTOR_TABLE});
+
+   print "Dropping delete queue table ($self->{DELETE_QUEUE_TABLE})\n"
+	if $PA;
+    $self->{DB}->drop_table($self->{DELETE_QUEUE_TABLE});
+
+    print "Dropping doc key table ($self->{DOC_KEY_TABLE})\n" if $PA;
+    $self->{DB}->drop_doc_key_table();
 
     foreach my $table ( @{$self->{INVERTED_TABLES}} ) {
 	print "Dropping inverted table ($table)\n" if $PA;
-	$self->db_drop_table($table);
+	$self->{DB}->drop_table($table);
     }
 }
 
 sub _collection_table_exists {
     my $self = shift;
-    return $self->db_table_exists($COLLECTION_TABLE);
+    return $self->{DB}->table_exists(COLLECTION_TABLE);
 }
 
 sub _create_collection_table {
     my $self = shift;
-    my $sql = $self->db_create_collection_table;
+    my $sql = $self->{DB}->create_collection_table;
     $self->{INDEX_DBH}->do($sql);
-    print "Creating collection table ($COLLECTION_TABLE)\n" if $PA;
+    print "Creating collection table (" . COLLECTION_TABLE . ")\n" if $PA;
 }
 
 sub collection_count {
     my $self = shift;
     my $collection_count = $self->{INDEX_DBH}->selectrow_array(
-					         $self->db_collection_count);
+			       $self->{DB}->collection_count );
     croak $DBI::errstr if $DBI::errstr;
     return $collection_count;
 }
@@ -1067,30 +1130,31 @@ sub _collection_table_upgrade_required {
     }
     eval {
 	$version = $self->{INDEX_DBH}->selectrow_array(
-			                 $self->db_fetch_collection_version);
+		       $self->{DB}->fetch_collection_version );
 	die $DBI::errstr if $DBI::errstr;
     };
     if ($@) {
 	print "... Problem fetching version column, must upgrade\n" if $PA > 1;
 	return 1;
     }
-    if ($version && ($version < $LAST_COLLECTION_TABLE_UPGRADE)) {
+    if ($version && ($version < LAST_COLLECTION_TABLE_UPGRADE)) {
 	print "... Collection table version too low, must upgrade\n"
 	    if $PA > 1;
 	return 1;
     }
-    print "... Collection table up-to-date\n" if $PA > 1;	
+    print "... Collection table up-to-date\n" if $PA > 1;
     return 0;
 }
 
 sub upgrade_collection_table {
     my $self = shift;
-    my $sth = $self->{INDEX_DBH}->prepare($self->db_fetch_all_collection_rows);
+    my $sth = $self->{INDEX_DBH}->prepare($self->{DB}->fetch_all_collection_rows);
     $sth->execute;
     croak $sth->errstr if $sth->errstr;
     if ($sth->rows < 1) {
-	print "No rows in collection table, dropping collection table ($self->{COLLECTION_TABLE})\n" if $PA;
-	$self->db_drop_table($self->{COLLECTION_TABLE});
+	print "No rows in collection table, dropping collection table ("
+	    . COLLECTION_TABLE . ")\n" if $PA;
+	$self->{DB}->drop_table(COLLECTION_TABLE);
 	$self->_create_collection_table;
 	return 1;
     } 
@@ -1101,7 +1165,7 @@ sub upgrade_collection_table {
 
     print "Upgrading collection table ...\n" if $PA;
     print "... Dropping old collection table ...\n" if $PA;
-    $self->db_drop_table($self->{COLLECTION_TABLE});
+    $self->{DB}->drop_table(COLLECTION_TABLE);
     print "... Recreating collection table ...\n" if $PA;
     $self->_create_collection_table;
 
@@ -1120,7 +1184,7 @@ sub upgrade_collection_table {
 	    if ($old_row->{language} eq 'cz') {
 		$new_row{charset} = 'iso-8859-2';
 	    } else {
-		$new_row{charset} = $CHARSET_DEFAULT;
+		$new_row{charset} = $COLLECTION_FIELD_DEFAULT{charset}
 	    }
 	}
 	if (exists $old_row->{document_table}) {
@@ -1132,9 +1196,9 @@ sub upgrade_collection_table {
 	if (exists $old_row->{document_fields}) {
 	    $new_row{doc_fields} = $old_row->{document_fields};
 	}
-	
+
 	print "... Inserting collection ($new_row{collection})\n" if $PA;
-	$self->db_insert_collection_table_row(\%new_row)
+	$self->{DB}->insert_collection_table_row(\%new_row)
     }
     return 1;
 }
@@ -1145,7 +1209,7 @@ sub _update_collection_info {
 
     my $attribute = $field;
     $attribute =~ tr/[a-z]/[A-Z]/;
-    my $sql = $self->db_update_collection_info($field);
+    my $sql = $self->{DB}->update_collection_info($field);
     $self->{INDEX_DBH}->do($sql, undef, $value, $self->{COLLECTION});
     $self->{$attribute} = $value;
 }
@@ -1153,7 +1217,7 @@ sub _update_collection_info {
 sub _delete_collection_info {
     my $self = shift;
 
-    my $sql = $self->db_delete_collection_info;
+    my $sql = $self->{DB}->delete_collection_info;
     $self->{INDEX_DBH}->do($sql, undef, $self->{COLLECTION});
     print "Deleting collection $self->{COLLECTION} from collection table\n"
 	if $PA;
@@ -1166,7 +1230,7 @@ sub _store_collection_info {
     print qq(Inserting collection $self->{COLLECTION} into collection table\n)
 	if $PA;
 
-    my $sql = $self->db_store_collection_info;
+    my $sql = $self->{DB}->store_collection_info;
     my $doc_fields = join (',', @{$self->{DOC_FIELDS}});
     my $stoplists = ref $self->{STOPLIST} ?
 	join (',', @{$self->{STOPLIST}}) : '';
@@ -1219,11 +1283,11 @@ sub _fetch_collection_info {
     return 0 unless $self->_collection_table_exists;
 
     if ($self->_collection_table_upgrade_required) {
-	carp "$ME: Collection table must be upgraded, call \$index->upgrade_collection_table() or create a new() \$index and call \$index->initialize() to upgrade the collection table";
+	carp __PACKAGE__ . ": Collection table must be upgraded, call \$index->upgrade_collection_table() or create a new() \$index and call \$index->initialize() to upgrade the collection table";
 	return 0;
     }
-    
-    my $sql = $self->db_fetch_collection_info;
+
+    my $sql = $self->{DB}->fetch_collection_info;
 
     my $sth = $self->{INDEX_DBH}->prepare($sql);
 
@@ -1272,7 +1336,7 @@ sub _fetch_collection_info {
     $self->{DOC_FIELDS} = \@doc_fields;
     $self->{STOPLIST} = \@stoplists;
 
-    $self->{CHARSET} = $self->{CHARSET} || $CHARSET_DEFAULT;
+    $self->{CHARSET} = $self->{CHARSET} || $COLLECTION_FIELD_DEFAULT{charset};
     $self->{CZECH_LANGUAGE} = $self->{CHARSET} eq 'iso-8859-2' ? 1 : 0;
 
     return $collection ? 1 : 0;
@@ -1284,14 +1348,14 @@ sub _phrase_fullscan {
     my $docref = shift;
     my $fno = shift;
     my $phrase = shift;
-    
+
     my @docs = @{$docref};
     my $docs = join(',', @docs);
     my @found;
 
     my $sql = $self->{CZECH_LANGUAGE} ? 
-	$self->db_phrase_scan_cz($docs, $fno) :
-	$self->db_phrase_scan($docs, $fno);
+	$self->{DB}->phrase_scan_cz($docs, $fno) :
+	$self->{DB}->phrase_scan($docs, $fno);
 
     my $sth = $self->{DOC_DBH}->prepare($sql);
 
@@ -1307,7 +1371,10 @@ sub _phrase_fullscan {
     } else {
 	$sth->bind_columns(\$doc_id);
     }
-    
+
+    # FIXME: this now works on doc_keys, not ids
+    # FIXME: come up with unit tests for indexes without proximity_index
+
     while($sth->fetch) {
 	if ($self->{CZECH_LANGUAGE}) {
 	    $content = $self->_lc_and_unac($content);
@@ -1341,7 +1408,7 @@ sub _fetch_docweights {
     if ($#fnos > -1) {
 	my $fnos = join(',', @fnos);
 
-	my $sql = $self->db_fetch_docweights($fnos);
+	my $sql = $self->{DB}->fetch_docweights($fnos);
 
 	my $sth = $self->{INDEX_DBH}->prepare($sql);
 
@@ -1350,7 +1417,7 @@ sub _fetch_docweights {
 	while (my $row = $sth->fetchrow_arrayref) {
 	    $self->{AVG_W_D}->[$row->[0]] = $row->[1];
 	    # Ugly, DBD::SQLite doesn't quote \0 when using placeholders
-	    if ($self->{DBD} eq 'SQLite') {
+	    if ($self->{DBD_TYPE} eq 'SQLite') {
 		my $packed_w_d = $row->[2];
 		$packed_w_d =~ s/\\0/\0/g;
 		$packed_w_d =~ s/\\\\/\\/g;
@@ -1375,7 +1442,7 @@ sub _search_okapi {
     my $k3 = 7;               #
     my $f_qt;                 # frequency of term in query
     my $f_t;                  # Number of documents that contain term
-    my $W_d;                  # weight of document, sqrt((1 + log(words))**2)
+    my $W_d;                  # weight of document, sqrt((1 + log(terms))**2)
     my $avg_W_d;              # average document weight in collection
     my $doc_id;               # document id
     my $f_dt;                 # frequency of term in given doc_id
@@ -1393,7 +1460,7 @@ sub _search_okapi {
     my $result_min = $self->{RESULT_VECTOR}->Min;
 
     if ($result_max < 1) {
-	throw $QRY( error => $ERROR{no_results} );
+	throw_query( error => $ERROR{no_results} );
     }
 
     foreach my $fno ( @{$self->{TERM_FIELD_NOS}} ) {
@@ -1402,23 +1469,34 @@ sub _search_okapi {
 	    $f_t = $self->{F_T}->[$fno]->{$term} ||
 		$self->{C}->f_t($fno, $term);
 	    $idf =  log(($N - $f_t + 0.5) / ($f_t + 0.5));
-	    next if $idf < $IDF_MIN_OKAPI; # FIXME: do we want do warn that term was stoplisted?
+	    next if $idf < IDF_MIN_OKAPI; # FIXME: do we want do warn that term was stoplisted?
 	    $f_qt = $self->{F_QT}->[$fno]->{$term};     # freq of term in query
 	    my $w_qt = (($k3 + 1) * $f_qt) / ($k3 + $f_qt); # query term weight
 	    my $term_docs = $self->{TERM_DOCS}->[$fno]->{$term} ||
 		$self->{C}->term_docs($fno, $term);
-	    score_term_docs_okapi($term_docs, \%score, $self->{RESULT_VECTOR}, $ACCUMULATOR_LIMIT, $result_min, $result_max, $idf, $f_t, $self->{W_D}->[$fno], $avg_W_d, $w_qt, $k1, $b);
+	    score_term_docs_okapi($term_docs, \%score, $self->{RESULT_VECTOR}, ACCUMULATOR_LIMIT, $result_min, $result_max, $idf, $f_t, $self->{W_D}->[$fno], $avg_W_d, $w_qt, $k1, $b);
 	}
     }
 
     unless (scalar keys %score) {
 	if (not @{$self->{STOPLISTED_QUERY}}) {
-	    throw $QRY( error => $ERROR{no_results} );
+	    throw_query( error => $ERROR{no_results} );
 	} else {
-	    throw $QRY( error => $self->_format_stoplisted_error );
+	    throw_query( error => $self->_format_stoplisted_error );
 	}
     }
-    return \%score;
+    return $self->_doc_ids_to_keys(\%score);
+}
+
+sub _doc_ids_to_keys {
+    my $self = shift;
+    my $score = shift;
+    my %copy = %$score;
+    my @doc_ids = sort { $a <=> $b } keys %$score;
+    my $doc_keys = $self->{DB}->fetch_doc_keys(\@doc_ids);
+    my %score_by_keys;
+    @score_by_keys{@$doc_keys} = @$score{@doc_ids};
+    return \%score_by_keys;
 }
 
 sub _format_stoplisted_error {
@@ -1479,7 +1557,7 @@ sub _optimize_or_search {
 	# sort in order of f_t
 	my @f_t_sorted =
 	    sort { $f_t{$a->{TERM}} <=> $f_t{$b->{TERM}} } @or_clauses;
-	
+
 	if ($or_term_count >= 1) {
 	    $f_t_sorted[0]->{MODIFIER} = 'AND';
 	}
@@ -1566,7 +1644,7 @@ sub _resolve_mask {
 sub _fetch_mask {
     my $self = shift;
 
-    my $sql = $self->db_fetch_mask;
+    my $sql = $self->{DB}->fetch_mask;
     my $sth = $self->{INDEX_DBH}->prepare($sql);
 
     my $mask_count = 0;
@@ -1635,8 +1713,13 @@ sub _positions {
 sub _commit_docs {
     my $self = shift;
 
+    my $added_ids = shift || $self->{ADDED_IDS};
+
+    my $id_a = $self->max_indexed_id + 1; # old max_indexed_id
+    $self->max_indexed_id($added_ids->[-1]);
+    $self->all_doc_ids($added_ids);
+
     my ($sql, $sth);
-    my $id_a = $self->{OLD_MAX_INDEXED_ID} + 1;
     my $id_b = $self->{MAX_INDEXED_ID};
 
     print "Storing doc weights\n" if $PA;
@@ -1645,7 +1728,7 @@ sub _commit_docs {
 
     $self->{INDEX_DBH}->begin_work;
 
-    $sth = $self->{INDEX_DBH}->prepare($self->db_update_docweights);
+    $sth = $self->{INDEX_DBH}->prepare($self->{DB}->update_docweights);
 
     no warnings qw(uninitialized);
     foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
@@ -1666,7 +1749,7 @@ sub _commit_docs {
 	$w_d[0] = 0 unless defined $w_d[0];
 	# FIXME: this takes too much space, use a float compression method
 	my $packed_w_d = pack 'f*', @w_d;
-	$self->db_update_docweights_execute($sth, $fno, $avg_w_d, $packed_w_d);
+	$self->{DB}->update_docweights_execute($sth, $fno, $avg_w_d, $packed_w_d);
 	# Set AVG_W_D and W_D cached values to new value, in case same 
 	# instance is used for search immediately after adding to index
 	$self->{AVG_W_D}->[$fno] = $avg_w_d;
@@ -1682,38 +1765,47 @@ sub _commit_docs {
 
     foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 
-	print("field$fno ", scalar keys %{$self->{TERM_DOCS_VINT}->[$fno]}, " distinct words\n") if $PA;
+	print("field$fno ", scalar keys %{$self->{TERM_DOCS_VINT}->[$fno]}, " distinct terms\n") if $PA;
 
 	my $s_sth;
 
 	# SQLite chokes with "database table is locked" unless s_sth
 	# is finished before i_sth->execute
-	unless ($self->{DBD} eq 'SQLite') {
-	    $s_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_select($self->{INVERTED_TABLES}->[$fno]) );
+	unless ($self->{DBD_TYPE} eq 'SQLite') {
+	    $s_sth = $self->{INDEX_DBH}->prepare(
+		         $self->{DB}->inverted_select(
+			    $self->{INVERTED_TABLES}->[$fno] ) );
 	}
-	my $i_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_replace($self->{INVERTED_TABLES}->[$fno]) );
+	my $i_sth = $self->{INDEX_DBH}->prepare(
+		        $self->{DB}->inverted_replace(
+			    $self->{INVERTED_TABLES}->[$fno] ) );
 
-	my $wc = 0;
-	while (my ($term, $term_docs_vint) = each %{$self->{TERM_DOCS_VINT}->[$fno]}) {
+	my $tc = 0;
+	while (my ($term, $term_docs_vint) =
+	       each %{$self->{TERM_DOCS_VINT}->[$fno]}) {
+
 	    print "$term\n" if $PA >= 2;
-	    if ($PA && $wc > 0) {
-		print "committed $wc words\n" if $wc % 500 == 0;
+	    if ($PA && $tc > 0) {
+		print "committed $tc terms\n" if $tc % 500 == 0;
 	    }
 
 	    my $o_docfreq_t = 0;
 	    my $o_term_docs = '';
 	    my $o_term_pos = '';
 
-	    $s_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_select($self->{INVERTED_TABLES}->[$fno]) ) if $self->{DBD} eq 'SQLite';
+	    $s_sth = $self->{INDEX_DBH}->prepare( $self->{DB}->inverted_select(
+				   $self->{INVERTED_TABLES}->[$fno]) )
+		if $self->{DBD_TYPE} eq 'SQLite';
 	    $s_sth->execute($term);
 	    $s_sth->bind_columns(\$o_docfreq_t, \$o_term_docs, \$o_term_pos);
 	    $s_sth->fetch;
-	    $s_sth->finish if $self->{DBD} eq 'SQLite';
-	    my $term_docs = pack_term_docs_append_vint($o_term_docs, $term_docs_vint);
+	    $s_sth->finish if $self->{DBD_TYPE} eq 'SQLite';
+	    my $term_docs = pack_term_docs_append_vint($o_term_docs,
+						       $term_docs_vint);
 
 	    my $term_pos = $o_term_pos . $self->{TERM_POS}->[$fno]->{$term};
 
-	    $self->db_inverted_replace_execute(
+	    $self->{DB}->inverted_replace_execute(
 		$i_sth, 
 	        $term,
 		$self->{DOCFREQ_T}->[$fno]->{$term} + $o_docfreq_t,
@@ -1723,9 +1815,9 @@ sub _commit_docs {
 
 	    delete($self->{TERM_DOCS_VINT}->[$fno]->{$term});
             delete($self->{TERM_POS}->[$fno]->{$term});
-	    $wc++;
+	    $tc++;
 	}
-	print "committed $wc words\n" if $PA && $wc > 0;
+	print "committed $tc terms\n" if $PA && $tc > 0;
 	# Flush temporary hashes after data is stored
 	delete($self->{TERM_DOCS_VINT}->[$fno]);
 	delete($self->{TERM_POS}->[$fno]);
@@ -1733,6 +1825,23 @@ sub _commit_docs {
     }
 
     $self->{INDEX_DBH}->commit;
+
+}
+
+sub _add_to_delete_queue {
+    my $self = shift;
+    my @ids = @_;
+    if (ref $ids[0] eq 'ARRAY') {
+	@ids = @{$ids[0]};
+    }
+
+    my $delete_queue_enum = $self->{DB}->fetch_delete_queue || "";
+    my $delete_queue_vector = Bit::Vector->new_Enum($self->max_indexed_id + 1,
+                                  $delete_queue_enum);
+
+    $delete_queue_vector->Index_List_Store(@ids);
+
+    $self->{DB}->update_delete_queue($delete_queue_vector->to_Enum);
 
 }
 
@@ -1753,7 +1862,8 @@ sub _all_doc_ids_remove {
 
     if (@ids) {
 	$self->{ALL_DOCS_VECTOR}->Index_List_Remove(@ids);
-	$self->{INDEX_DBH}->do($self->db_update_all_docs_vector, undef, $self->{ALL_DOCS_VECTOR}->to_Enum);
+	$self->{INDEX_DBH}->do($self->{DB}->update_all_docs_vector, undef,
+			       $self->{ALL_DOCS_VECTOR}->to_Enum);
     }
 
 }
@@ -1766,7 +1876,6 @@ sub all_doc_ids {
     if (ref $ids[0] eq 'ARRAY') {
 	@ids = @{$ids[0]};
     }
-    
     no warnings qw(uninitialized);
     unless (ref $self->{ALL_DOCS_VECTOR}) {
 	$self->{ALL_DOCS_VECTOR} = Bit::Vector->new_Enum(
@@ -1780,10 +1889,13 @@ sub all_doc_ids {
 	    $self->{ALL_DOCS_VECTOR}->Resize($self->max_indexed_id + 1);
 	}
 	$self->{ALL_DOCS_VECTOR}->Index_List_Store(@ids);
-	$self->{INDEX_DBH}->do($self->db_update_all_docs_vector, undef, $self->{ALL_DOCS_VECTOR}->to_Enum);
+	$self->{INDEX_DBH}->do($self->{DB}->update_all_docs_vector, undef,
+			       $self->{ALL_DOCS_VECTOR}->to_Enum);
+    } else {
+	# FIXME: this is probably unnecessary, but older versions
+	# had this documented as a public method
+	return $self->{ALL_DOCS_VECTOR}->Index_List_Read;
     }
-
-    return $self->{ALL_DOCS_VECTOR}->Index_List_Read;
 }
 
 sub fetch_all_docs_vector {
@@ -1798,7 +1910,7 @@ sub fetch_all_docs_vector {
 
 sub _fetch_all_docs_vector {
     my $self = shift;
-    my $sql = $self->db_fetch_all_docs_vector;
+    my $sql = $self->{DB}->fetch_all_docs_vector;
     return scalar $self->{INDEX_DBH}->selectrow_array($sql);
 }
 
@@ -1808,11 +1920,23 @@ sub _fetch_doc {
     my $id = shift;
     my $field = shift;
 
-    my $sql = $self->db_fetch_doc($field);
+    my $sql = $self->{DB}->fetch_doc($field);
     return scalar $self->{DOC_DBH}->selectrow_array($sql, undef, $id);
 }
 
-sub _words {
+sub _fetch_doc_all_fields {
+    my $self = shift;
+    my $id = shift;
+    my $sql = $self->{DB}->fetch_doc_all_fields();
+    my @fields = $self->{DOC_DBH}->selectrow_array($sql, undef, $id);
+    my %fields;
+    foreach my $i (0 .. $#fields) {
+	$fields{$self->{DOC_FIELDS}->[$i]} = $fields[$i];
+    }
+    return \%fields;
+}
+
+sub _terms {
     my $self = shift;
     my $doc = shift;
 
@@ -1838,7 +1962,7 @@ sub _ping_doc {
     my $self = shift;
     my $id = shift;
     my $found_doc = 0;
-    my $sql = $self->db_ping_doc;
+    my $sql = $self->{DB}->ping_doc;
     ($found_doc) = $self->{DOC_DBH}->selectrow_array($sql, undef, $id);
     return $found_doc;
 }
@@ -1850,18 +1974,18 @@ sub _create_tables {
     # mask table
 
     print "Dropping mask table ($self->{MASK_TABLE})\n"	if $PA;
-    $self->db_drop_table($self->{MASK_TABLE});
+    $self->{DB}->drop_table($self->{MASK_TABLE});
 
-    $sql = $self->db_create_mask_table;
+    $sql = $self->{DB}->create_mask_table;
     print "Creating mask table ($self->{MASK_TABLE})\n" if $PA;
     $self->{INDEX_DBH}->do($sql);
 
     # docweights table
 
     print "Dropping docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
-    $self->db_drop_table($self->{DOCWEIGHTS_TABLE});
+    $self->{DB}->drop_table($self->{DOCWEIGHTS_TABLE});
 
-    $sql = $self->db_create_docweights_table;
+    $sql = $self->{DB}->create_docweights_table;
     print "Creating docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
     $self->{INDEX_DBH}->do($sql);
 
@@ -1869,19 +1993,36 @@ sub _create_tables {
 
     print "Dropping docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n"
 	if $PA;
-    $self->db_drop_table($self->{ALL_DOCS_VECTOR_TABLE});
+    $self->{DB}->drop_table($self->{ALL_DOCS_VECTOR_TABLE});
 
-    $sql = $self->db_create_all_docs_vector_table;
-    print "Creating docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n" if $PA;
-    $self->{INDEX_DBH}->do($sql);
+    print "Creating docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n"
+	if $PA;
+    $self->{INDEX_DBH}->do($self->{DB}->create_all_docs_vector_table);
+
+    # delete queue table
+
+    print "Dropping delete queue table ($self->{DELETE_QUEUE_TABLE})\n"
+	if $PA;
+    $self->{DB}->drop_table($self->{DELETE_QUEUE_TABLE});
+
+    print "Creating delete queue table ($self->{DELETE_QUEUE_TABLE})\n"
+	if $PA;
+    $self->{INDEX_DBH}->do($self->{DB}->create_delete_queue_table);
+
+    # doc key table
+
+    print "Dropping doc key table ($self->{DOC_KEY_TABLE})\n" if $PA;
+    $self->{DB}->drop_doc_key_table();
+    print "Creating doc key table ($self->{DOC_KEY_TABLE})\n" if $PA;
+    $self->{INDEX_DBH}->do($self->{DB}->create_doc_key_table);
 
     # inverted tables
 
     foreach my $table ( @{$self->{INVERTED_TABLES}} ) {
-	$self->db_drop_table($table);
 	print "Dropping inverted table ($table)\n" if $PA;
+	$self->{DB}->drop_table($table);
 
-	$sql = $self->db_create_inverted_table($table);
+	$sql = $self->{DB}->create_inverted_table($table);
 	print "Creating inverted table ($table)\n" if $PA;
 	$self->{INDEX_DBH}->do($sql);
     }
@@ -1889,15 +2030,58 @@ sub _create_tables {
 
 sub _stoplisted {
     my $self = shift;
-    my $word = shift;
+    my $term = shift;
 
-    if ($self->{STOPLIST} and $self->{STOPLISTED_WORDS}->{$word}) {
-	push(@{$self->{STOPLISTED_QUERY}}, $word);
-	print "stoplisting: $word\n" if $PA > 1;
+    if ($self->{STOPLIST} and $self->{STOPLISTED_WORDS}->{$term}) {
+	push(@{$self->{STOPLISTED_QUERY}}, $term);
+	print "stoplisting: $term\n" if $PA > 1;
 	return 1;
     } else {
 	return 0;
     }
+}
+
+sub create_accessors {
+    my $fields = shift;
+    my $pkg = caller();
+    no strict 'refs';
+    foreach my $field (@$fields) {
+	*{"${pkg}::$field"} = sub {
+	    my $self = shift;
+	    $self->set({ $field => shift }) if @_;
+	    return $self->{$field};
+	}
+    }
+}
+
+sub get {
+    my $self = shift;
+    return wantarray ? @{$self}{@_} : $self->{$_[0]};
+}
+
+sub set {
+    my $self = shift;
+
+    throw_gen({ error => 'incorrect number of args for set()' })
+	unless @_;
+
+    my ($keys, $values) = @_ == 1 ? ([keys %{$_[0]}], [values %{$_[0]}]) : @_;
+
+    my ($key, $old_value, $new_value, $is_dirty);
+    foreach my $i (0 .. $#$keys) {
+	$key = $keys->[$i];
+	$new_value = $values->[$i];
+	$old_value = $self->{uc $key};
+
+	if ((not defined $new_value and not defined $old_value) or
+	    (defined $new_value and defined $old_value and
+	     $old_value eq $new_value)) {
+	    next;
+	}
+	$is_dirty = 1;
+	$self->{uc $key} = $new_value;
+    }
+    return $self;
 }
 
 1;
@@ -1912,45 +2096,26 @@ DBIx::TextIndex - Perl extension for full-text searching in SQL databases
 
  use DBIx::TextIndex;
 
- my $index = DBIx::TextIndex->new({
-     doc_dbh => $doc_dbh,
-     doc_table => 'doc_table',
-     doc_fields => ['column_1', 'column_2'],
-     doc_id_field => 'primary_key',
+ $index = DBIx::TextIndex->new({
      index_dbh => $index_dbh,
-     collection => 'collection_1',
-     proximity_index => 1,
-     errors => {
-         empty_query => "your query was empty",
-         quote_count => "phrases must be quoted correctly",
-    	 no_results => "your seach did not produce any results",
-    	 no_results_stop => "no results, these words were stoplisted: "
-     },
-     charset => 'iso-8859-1'.
-     stoplist => [ 'en' ],
-     max_word_length => 12,
-     phrase_threshold => 1000,
-     min_wildcard_length => 1,
-     decode_html_entities => 1,
-     print_activity => 0
+     collection => 'collection_name',
+     doc_fields => ['field1', 'field2'],
  });
 
- $index->initialize;
+ $index->initialize();
 
- $index->add_doc(\@doc_ids);
+ $index->add( key1 => { field1 => 'some text', field2 => 'more text' } );
 
- my $results = $index->search({
-     column_1 => '"a phrase" +and -not or',
-     column_2 => 'more words',
+ $results = $index->search({
+     field1 => '"a phrase" +and -not or',
+     field2 => 'more words',
  });
 
- foreach my $doc_id
+ foreach my $key
      (sort {$$results{$b} <=> $$results{$a}} keys %$results ) 
  {
-     print "DocID: $doc_id Score: $$results{$doc_id} \n";
+     print "Key: $key Score: $$results{$key} \n";
  }
-
- $index->delete;
 
 =head1 DESCRIPTION
 
@@ -1959,170 +2124,428 @@ columns stored in a database.  Almost any database with BLOB and DBI
 support should work with minor adjustments to SQL statements in the
 module.  MySQL, PostgreSQL, and SQLite are currently supported.
 
-Operates in case insensitive manner.
+As of version 0.24, data from any source can be indexed by passing it
+to the C<add()> method as a string.
+
+=head1 INDEX CREATION
+
+=head2 Preparing an index for use for the first time
+
+To set up a new index, call C<new()>, followed by C<initialize()>.
+
+ $index = DBIx::TextIndex->new({
+     index_dbh => $dbh,
+     collection => 'my_books',
+     doc_fields => [ 'title', 'author', 'text' ],
+ });
+
+ $index->initialize();
+
+C<initialize()> should only be called the first time a new index is created.
+Calling initialize a second time with the same collection name will delete
+and re-create the index.
+
+The C<doc_fields> attribute specifies which fields of a document are contained
+in the index.  This decision must be made at initialization -- additional
+document fields cannot be added to the index later.
+
+After the index is initialized once, subsequent calls to C<new()> require
+only the C<index_dbh> and C<collection> arguments.
+
+ $index = DBIx::TextIndex->new({
+     index_dbh => $dbh,
+     collection => 'my_books',
+ });
+
+=head2 Adding documents to the index
+
+Every document is made up of fields, and has a unique key that is
+returned with search results.
+
+ $index->add( book1 => {
+                         author => 'Leo Tolstoy',
+                         title => 'War and Peace',
+                         text => '"Well, Prince, so Genoa and Lucca ...',
+                       },
+
+              book2 => {
+                         author => 'J.R.R. Tolkien',
+                         title => 'The Hobbit',
+                         text => 'In a hole in the ground there lived ...',
+                       },
+             );
+
+With each call to C<add()>, the index is written to tables in the underlying
+SQL database.
+
+When adding many documents in a loop, use C<begin_add()> and C<commit_add()>
+around the loop.  This will increase indexing performance by 
+delaying writes to the SQL database until C<commit_add()> is called.
+
+ $index->begin_add();
+
+ while ( my ($book_id, $author, $title, $text) = fetch_doc() ) {
+     $index->add( $book_id => { author => $author,
+                                title => $title,
+                                text => $text }   );
+ }
+
+ $index->commit_add();
+
+=head2 Indexing data in SQL tables
+
+DBIx::TextIndex has additional convenience methods to index data contained
+in SQL tables.  Before calling C<initialize()> also set the C<doc_dbh>,
+C<doc_table>, and C<doc_id_field> attributes:
+
+ $index = DBIx::TextIndex->new({
+     index_dbh => $dbh,
+     collection => 'my_books',
+     doc_dbh => $doc_dbh,
+     doc_table => 'book',
+     doc_id_field => 'book_id',
+     doc_fields => [ 'title', 'author', 'text' ],
+ });
+
+ $index->initialize();
+
+After initialization, subsequent creation of index objects only require
+the C<index_dbh>, C<collection>, and C<doc_dbh> arguments:
+
+ $index = DBIx::TextIndex->new({
+     index_dbh => $dbh,
+     collection => 'my_books',
+     doc_dbh => $doc_dbh,
+ });
+
+Passing an array of ids to C<add_doc()> indexes the C<doc_fields>
+(columns) in C<doc_table> matched using the C<doc_id_field> column.
+
+ $index->add_doc(1, 2, 3);
+
+C<add_doc()> creates SQL statements to retrieve data from the document table
+before adding to the index. In the above example, a series of statements like
+C<"SELECT title, author, text FROM book WHERE book_id = 1"> would be issued.
+
+If more flexibility is needed, data could be fetched first and passed to the
+C<add()> method instead. For example, a multi-table JOIN could be issued
+or several columns could be concatenated into a single index field.
+
+=head1 QUERY SYNTAX
+
+FIXME: This section is incomplete.
+
+Searches are case insensitive.
+
+=head2 Phrase Searches
+
+Enclose phrases in double quotes:
+
+ "See Spot run"
+
+=head2 Proximity Searches
+
+Use the tilde C<"~"> operator at the end of phrase to find words within
+a certain distance.
+
+ "some phrase"~1   - matches only exact "some phrase"
+ "some phrase"~2   - matches "some other phrase"
+ "some phrase"~10  - matches "some [1..9 words] phrase"
+
+Defaults to C<~1> when omitted, which is a normal phrase search.
+
+The proximity match works from left to right, which means C<"some
+phrase"~3> does not match C<"phrase other some"> or C<"phrase some">
+
+=head2 Wildcard Partial-Term Searches
+
+You can use wildcard characters C<"*"> or C<"?"> at the end of or in
+the middle of search terms:
+
+C<"*"> matches zero or more characters
+
+ car*	  - "car", "cars", "careful", "cartel", ....
+ ca*r     - "car", "career", "caper", "cardiovascular"
+
+C<"?"> matches any single character
+
+  car?    - "care", "cars", "cart"
+  d?g     - "dig", "dog", "dug"
+
+C<"+"> at the end matches singular or plural form (naively, by
+         appending an 's' to the word)
+
+  car+    - "car", "cars"
+
+By default, at least 1 alphanumeric character must appear before the
+first wildcard character.  The option C<min_wildcard_length> can
+changed to require more alphanumeric characters before the first
+wildcard.
+
+The option C<max_wildcard_term_expansion> specifies the maximum number
+of words a wildcard term can expand to before throwing a query
+exception.  The default is 30 words.
+
+=head1 USAGE
 
 The following methods are available:
 
-=head2 $index = DBIx::TextIndex->new(\%args)
+=head2 C<new()>
 
-Constructor method.  The first time an index is created, the following
-arguments must be passed to new():
+ $index = DBIx::TextIndex->new(\%args)
 
- my $index = DBIx::TextIndex->new({
-     doc_dbh => $doc_dbh,
-     doc_table => 'doc_table',
-     doc_fields => ['column_1', 'column_2'],
-     doc_id_field => 'primary_key',
-     index_dbh => $index_dbh,
-     collection => 'collection_1'
- });
+Constructor method, accepts args as a hashref.  The first time an index is
+created, C<index_dbh>, C<collection>, C<doc_fields> and must be passed.
+For subsequent calls to new, only C<index_dbh> and C<collection> are 
+required.
+
+To index documents using C<add_doc()>, C<doc_dbh>, C<doc_table>, and
+C<doc_id_field> are also required for initialization. C<doc_dbh> is required
+each time the index is used to add documents.
 
 Other arguments are optional.
 
+C<new()> accepts these arguments:
+
 =over 4
+
+=item index_dbh
+
+ index_dbh => $index_dbh
+
+DBI connection handle used to store tables for DBIx::TextIndex.
+Use a separate database if possible to avoid name collisions
+with existing tables.
+
+=item collection
+
+ collection => $collection
+
+A name for the index. Should contain only alpha-numeric characters or
+underscores [A-Za-z0-9_]. Limited to 100 characters.
 
 =item doc_dbh
 
-DBI connection handle to database containing text documents
+ doc_dbh => $doc_dbh
+
+A DBI connection handle to database containing text documents
 
 =item doc_table
+
+ doc_table => $doc_table
 
 Name of database table containing text documents
 
 =item doc_fields
 
-Reference to a list of column names to be indexed from doc_table
+ doc_fields => \@doc_fields
+
+An arrayref of fields contained in the index.  If using C<add_doc()>,
+lists column names to be indexed in C<doc_table>.
 
 =item doc_id_field
 
-Name of a unique integer key column in doc_table
+ doc_id_field => $doc_id_field
 
-=item index_dbh
-
-DBI connection handle to database containing TextIndex tables.  Using
-a separate database for your TextIndex is recommended, because the
-module creates and drops tables without warning.
-
-=item collection
-
-A name for the index.  Should contain only alpha-numeric characters or
-underscores [A-Za-z0-9_]
+Name of an integer key column in C<doc_table>.  Must be a primary or unique
+key.
 
 =item proximity_index
 
-Newer compressed proximity index is turned on by default as of version
-0.22.
+ proximity_index => 1
 
-	"some phrase"~2 => matches "some nice phrase"
-	"some phrase"~1 => matches only exact "some phrase"
-	"some phrase"~10 => matches "some [1..9 words] phrase"
-
-	Defaults to ~1 when omitted.
-
-The proximity matches work only forwards, not backwards, that means:
-
-  	"some phrase"~3 does not match "phrase nice some" or "phrase some"
-
-=item db
-
-In past versions, the database driver name was passed in this argument.
-As of version 0.22, the driver name is read from the database handle
-passed to index_dbh.
+Enables index structure to support phrase and proximity searches. Default
+is on (C<1>), pass C<0> to turn off.
 
 =item errors
 
+ errors => {
+     empty_query => "your query was empty",
+     quote_count => "phrases must be quoted correctly",
+     no_results => "your seach did not produce any results",
+     no_results_stop => "no results, these words were stoplisted: ",
+     wildcard_length =>
+	    "Use at least one letter or number at the beginning " .
+	    "of the word before wildcard characters.",
+     wildcard_expansion =>
+        "The wildcard term you used was too broad, " .
+	"please use more characters before or after the wildcard",
+ }
+
 This hash reference can be used to override default error messages.
-Please refer to the SYNOPSIS for meaning of the particular keys and
-values.
 
 =item charset
+
+ charset => 'iso-8859-1'
+
 Default is 'iso-8859-1'.
 
 Accented characters are converted to ASCII equivalents based on the charset.
 
 Pass 'iso-8859-2' for Czech or other Slavic languages.
 
+Only iso-8859-1 and iso-8859-2 have been tested.
+
 =item stoplist
 
+ stoplist => [ 'en' ]
+
 Activates stoplisting of very common words that are present in almost
-every document. Default is not to use stoplisting.  Value of the
+every document. Default is to not use stoplisting.  Value of the
 parameter is a reference to array of two-letter language codes in
 lower case.  Currently only two stoplists exist:
 
-	en => English
-	cz => Czech
+ en - English
+ cz - Czech
+
+Stoplisting is usually not recommended because certain queries
+containing common words cannot be resolved, such as: "The Who" or "To
+be or not to be."  DBIx::TextIndex is optimized well enough that the
+performance gains from stoplisting are minimal.
 
 =item max_word_length
+
+ max_word_length => 20
 
 Specifies maximum word length resolution. Defaults to 20 characters.
 
 =item phrase_threshold
 
-Defaults to 1000 documents.
+ phrase_threshold => 1000
+
+If C<proximity_index> is turned off, and documents were indexed with
+C<add_doc()>, and C<doc_dbh> is available, some phrase queries can be
+resolved by scanning the original document rows with a LIKE '%phrase%'
+query.  The phrase threshold is the maximum number of rows that will
+be scanned.
+
+It is recommended that the C<proximity_index> option always be used,
+because it is more efficient than scanning rows, and it is not limited
+to documents added using C<add_doc()>.
 
 =item decode_html_entities
 
-Decode html entities before indexing documents (e.g. &amp; -> &). 
+ decode_html_entities => 1
+
+Decode html entities before indexing documents (e.g. &amp; -> &).
 Default is 1.
 
 =item print_activity
 
+ print_activity => 0
+
 Activates STDOUT debugging. Higher value increases verbosity.
+
+=item update_commit_interval
+
+ update_commit_interval => 20000
+
+When indexing a large number of documents using C<add_doc()> or
+C<add()> inside a C<begin_add()> / C<commit_add()> block, this setting
+will trigger an automatic commit to the database when the number of
+added documents exceeds this number.
+
+Setting this higher will increase indexing speed, but also increase
+memory usage. In tests, the default setting of 20000 when indexing
+10KB documents results in about 500MB of memory used.
+
+=item doc_key_sql_type
+
+ doc_key_sql_type => varchar
+
+SQL datatype to store doc keys, defaults to varchar. If only numeric
+keys are required, this could be changed to an integer type for more
+compact storage.
+
+=item doc_key_length
+
+ doc_key_length => 200
+
+The maximum length of a doc_key.
 
 =back
 
 After creating a new TextIndex for the first time, and after calling
-initialize(), only the index_dbh, doc_dbh, and collection
-arguments are needed to create subsequent instances of a TextIndex.
+initialize(), only the index_dbh, doc_dbh, and collection arguments
+are needed to create subsequent instances of a TextIndex.
 
-=head2 $index->initialize
+=head2 C<initialize()>
 
-This method creates all the inverted tables for the TextIndex in the
-database specified by doc_dbh. This method should be called only
-once when creating a new index! It drops all the inverted tables
-before creating new ones.
+ $index->initialize()
 
-initialize() also stores the doc_table, doc_fields,
-doc_id_field, char_set, stoplist, error attributes,
-proximity_index, max_word_length, phrase_threshold
-and min_wildcard_length preferences in a special table called
-"collection," so subsequent calls to new() for a given collection do
+This method creates all the inverted tables for DBIx::TextIndex in the
+database specified by index_dbh. This method should be called only
+once when creating an index for the first time. It drops all the
+inverted tables before creating new ones.
+
+C<initialize()> also stores the C<doc_table>, C<doc_fields>,
+C<doc_id_field>, C<char_set>, C<stoplist>, C<error> attributes,
+C<proximity_index>, C<max_word_length>, C<phrase_threshold> and
+C<min_wildcard_length> preferences in a special table called
+"collection," so subsequent calls to C<new()> for a given collection do
 not need those arguments.
 
-Calling initialize() will upgrade the collection table created by
+Calling C<initialize()> will upgrade the collection table created by
 earlier versions of DBIx::TextIndex if necessary.
 
-=head2 $index->upgrade_collection_table
+=head2 C<add()>
 
-Upgrades the collection table to the latest format. Usually does not
-need to be called by the programmer, because initialize() handles
-upgrades automatically.
+ $index->add($doc_key, \%doc_fields)
 
-=head2 $index->add_doc(\@doc_ids)
+Indexes a document represented by hashref, where the keys of the hash
+are field names and the values are strings to be indexed.  When
+C<search()> is called, and a hit for that document is scored,
+C<$doc_key> will be returned in the search results.
 
-Add all the @docs_ids from doc_id_field to the TextIndex.
-All further calls to add_doc() must use @doc_ids higher than
-those previously added to the index.  Reindexing previously-indexed
-documents will yield unpredictable results!
+=head2 C<begin_add()>
 
-=head2 $index->remove_doc(\@doc_ids)
+Before performing a large number of <add()> operations in a loop, call
+C<begin_add()> to delay writing to the database until C<commit_add()>
+is called. If C<begin_add()> is not called, C<add()> will run in an
+"autocommit" mode.
 
-This method accepts a reference to an array of doc ids as its
-parameter. The specified documents will be removed from the index, but
-not from the actual documents table that is being indexed. The
-documents itself must be accessible when you remove them from the
-index. The ids should be sorted from lowest to highest.
+Has no effect if using C<add_doc()> method instead of C<add()>.
 
-It's actually not possible to completely recover the space taken by
-the documents that are removed, therefore it's recommended to rebuild
-the index when you remove a significant amount of documents.
+The C<update_commit_interval> parameter defines an upper limit on the
+number of documents held in memory before being committed to the
+database. If the limit is reached, the changes to the index will be
+comitted at that point.
 
-=head2 $index->search(\%search_args)
+=head2 C<commit_add()>
 
-search() returns $results, a hash reference.  The keys of the
+Commits a group of C<add()> operations to the database. It is only
+necessary to call this if C<begin_add()> was called first.
+
+=head2 C<add_doc()>
+
+ $index->add_doc(\@doc_ids)
+
+Adds all the C<@docs_ids> matching rows with C<doc_id_field> from
+C<doc_table> to the index. Reads from the database handle specified by
+C<doc_dbh>.
+
+If C<@doc_ids> references documents that are already indexed, those
+documents will be re-indexed.
+
+=head2 C<remove()>
+
+ $index->remove(\@doc_keys)
+
+C<@doc_keys> can be a list of doc keys originally passed to C<add()>
+or the numeric doc ids used for C<add_doc()>.
+
+The disk space used for the removed doc keys is not recovered, so an
+index rebuild is recommended after a significant amount of documents
+are removed.
+
+=head2 C<search()>
+
+ $results = $index->search(\%args)
+
+C<search()> returns C<$results>, a hash reference.  The keys of the
 hash are doc ids, and the values are the relative scores of the
-documents.  If an error occured while searching, search will throw
-a DBIx::TextIndex::Exception::Query object.
+documents.  If an error occured while searching, search will throw a
+DBIx::TextIndex::Exception::Query object.
 
  eval {
      $results = $index->search({
@@ -2142,7 +2565,9 @@ a DBIx::TextIndex::Exception::Query object.
      print "The score for $doc_id is $results->{$doc_id}\n";
  }
 
-=head2 $index->unscored_search(\%search_args)
+=head2 C<unscored_search()>
+
+ $doc_keys = $index->unscored_search(\%args)
 
 unscored_search() returns $doc_ids, a reference to an array.  Since
 the scoring algorithm is skipped, this method is much faster than search().
@@ -2167,26 +2592,36 @@ bad or no results are found.
      map { print "$_\n" } @$doc_ids;
  }
 
-=head2 @doc_ids = $index->all_docs_ids
+=head2 C<optimize()>
 
-all_doc_ids() return a list of all doc_ids currently in the index.
+FIXME: Implementation not complete
 
-=head2 $index->stat
+=head2 C<delete()>
+
+ $index->delete()
+
+C<delete()> removes the tables associated with a TextIndex from index_dbh.
+
+=head2 C<stat()>
 
 Allows you to obtain some meta information about the index. Accepts one
 parameter that specifies what you want to obtain.
 
-	$index->stat('total_words')
+ $index->stat('total_words')
 
 Returns a total count of words in the index. This number
 may differ from the total count of words in the documents
 itself.
 
-=head2 $index->delete
+=head2 C<upgrade_collection_table()>
 
-delete() removes the tables associated with a TextIndex from index_dbh.
+ $index->upgrade_collection_table()
 
-=head1 SUPPORT FOR SEARCH MASKS
+Upgrades the collection table to the latest format. Usually does not
+need to be called by the programmer, because initialize() handles
+upgrades automatically.
+
+=head1 BOOLEAN SEARCH MASKS
 
 DBIx::TextIndex can apply boolean operations on arbitrary lists of
 doc ids to search results.
@@ -2204,7 +2639,9 @@ Take this table:
 Masks that represent doc ids for in each the three categories can
 be created:
 
-=head2 $index->add_mask($mask_name, \@doc_ids);
+=head2 C<add_mask()>
+
+ $index->add_mask($mask_name, \@doc_ids);
 
  $index->add_mask('green_category', [ 1, 2, 6 ]);
  $index->add_mask('blue_category', [ 3, 5 ]);
@@ -2213,7 +2650,7 @@ be created:
 The first argument is an arbitrary string, and the second is a
 reference to any array of doc ids that the mask name identifies.
 
-mask operations are passed in a second argument hash reference to
+Mask operations are passed in a second argument hash reference to
 $index->search():
 
  %query_args = (
@@ -2229,7 +2666,7 @@ $index->search():
      or_mask_set => [ \@or_mask_list_1, \@or_mask_list_2, ... ],
  );
 
-$index->search(\%query_args, \%args);
+ $index->search(\%query_args, \%args);
 
 =over 4
 
@@ -2276,41 +2713,15 @@ calculated:
  $index->search(\%query_args,
                 { or_mask => [ 'blue_category', 'red_category' ] });
 
-=head2 $index->delete_mask($mask_name);
+=back
+
+=head2 C<delete_mask()>
+
+ $index->delete_mask($mask_name);
 
 Deletes a single mask from the mask table in the database.
 
-=head1 PARTIAL PATTERN MATCHING USING WILDCARDS
-
-You can use wildcard characters "*" or "?" at the end of or in the middle
-of words
-
-Example:
-
-    "*" matches zero or more characters
-
-    car*	==> "car", "cars", "careful", "cartel", ....
-    ca*r        ==> "car", "career", "caper", "cardiovascular"
-
-    "?" matches any single character
-
-    car?        ==> "care", "cars", "cart"
-    d?g         ==> "dig", "dog", "dug"
-
-    "+" at the end matches singular or plural form (naively, by
-         appending an 's' to the word)
-
-    car+	==> "car", "cars"
-
-By default, at least 1 alphanumeric character must appear before the 
-first wildcard character.  The option B<min_wildcard_length> can changed
-to require more alphanumeric characters before the first wildcard.
-
-The option B<max_wildcard_term_expansion> specifies the maximum number of
-words a wildcard term can expand to before throwing a query exception. 
-The default is 30 words.   
-
-=head1 HIGHLIGHTING OF QUERY WORDS OR PATTERNS IN RESULTING DOCUMENTS
+=head1 RESULTS HIGHLIGHTING
 
 A module HTML::Highlight can be used either
 independently or together with DBIx::TextIndex for this task.
@@ -2319,7 +2730,7 @@ The HTML::Highlight module provides a very nice Google-like
 highligting using different colors for different words or phrases and also
 can be used to preview a context in which the query words appear in
 resulting documents.
-		
+
 The module works together with DBIx::TextIndex using its new method
 html_highlight().
 

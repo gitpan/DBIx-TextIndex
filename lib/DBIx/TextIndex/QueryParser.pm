@@ -48,13 +48,15 @@ sub _parse {
 	    next;
 	}
 
-	if ($q =~ s/^(AND|OR)\s+//) {
+	if ($q =~ s/^(AND|OR|\&\&|\|\|)\s+//) {
 	    $clause->{CONJ} = $1;
+	    $clause->{CONJ} = 'AND' if $clause->{CONJ} eq '&&';
+	    $clause->{CONJ} = 'OR' if $clause->{CONJ} eq '||';
 	}
 
 	if ($q =~ s/^\+//) {
 	    $clause->{MODIFIER} = 'AND';
-	} elsif ($q =~ s/^\-//) {
+	} elsif ($q =~ s/^(-|NOT|!)\s*//) {
 	    $clause->{MODIFIER} = 'NOT';
 	} else {
 	    $clause->{MODIFIER} = 'OR';

@@ -5,25 +5,16 @@ use strict;
 our $VERSION = '0.22';
 
 use Bit::Vector;
-#use DBIx::TextIndex;
+
+use base qw(DBIx::TextIndex);
 
 sub new {
     my $pkg = shift;
     my $class = ref($pkg) || $pkg;
     my $self = bless {}, $class;
-    $self->_init(shift);
-    my $dbd = 'DBIx/TextIndex/DBD/' . $self->{DBD} . '.pm';
-    do $dbd;
-
-    return $self;
-}
-
-sub _init {
-    my $self = shift;
     my $args = shift;
-    while (my ($k, $v) = each %$args) {
-	$self->{uc $k} = $v;
-    }
+    $self->set($args) if $args;
+    return $self;
 }
 
 sub max_indexed_id {
@@ -105,7 +96,8 @@ sub vector {
 sub f_t {
     my $self = shift;
     my ($fno, $term) = @_;
-    $self->_fetch_term_docs($fno, $term) unless exists $self->{DOCFREQ_T}->[$fno]->{$term};
+    $self->_fetch_term_docs($fno, $term)
+	unless exists $self->{DOCFREQ_T}->[$fno]->{$term};
     return $self->{DOCFREQ_T}->[$fno]->{$term};
 }
 
@@ -113,18 +105,18 @@ sub _fetch_term_pos {
     my $self = shift;
     my ($fno, $term) = @_;
     my $sql =
-	$self->db_fetch_term_pos($self->{INVERTED_TABLES}->[$fno]);
+	$self->{DB}->fetch_term_pos($self->{INVERTED_TABLES}->[$fno]);
 
     ($self->{TERM_POS}->[$fno]->{$term})
-	= $self->{DBH}->selectrow_array($sql, undef, $term);
+	= $self->{INDEX_DBH}->selectrow_array($sql, undef, $term);
 }
 
 sub _fetch_term_docs {
     my $self = shift;
     my ($fno, $term) = @_;
-    my $sql =
-	$self->db_fetch_term_freq_and_docs($self->{INVERTED_TABLES}->[$fno]);
+    my $sql = $self->{DB}->fetch_term_freq_and_docs(
+                $self->{INVERTED_TABLES}->[$fno]);
 
     ($self->{DOCFREQ_T}->[$fno]->{$term}, $self->{TERM_DOCS}->[$fno]->{$term})
-	= $self->{DBH}->selectrow_array($sql, undef, $term);
+	= $self->{INDEX_DBH}->selectrow_array($sql, undef, $term);
 }

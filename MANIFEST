@@ -13,6 +13,7 @@ eg/html_search.cgi
 eg/search.pl
 eg/remove.pl
 lib/DBIx/TextIndex.pm
+lib/DBIx/TextIndex/DBD.pm
 lib/DBIx/TextIndex/Exception.pm
 lib/DBIx/TextIndex/QueryParser.pm
 lib/DBIx/TextIndex/TermDocsCache.pm
