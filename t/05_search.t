@@ -1,4 +1,4 @@
-use Test::More tests => 6;
+use Test::More tests => 7;
 
 use strict;
 
@@ -38,7 +38,8 @@ my @terms = ('isle',
 	     '"captain he said"',
 	     'unweeting hap fordonne isle');
 
-my @result_docs;
+my @result_docs_tfidf;
+my @result_docs_okapi;
 
 foreach my $term (@terms) {
     my $top_doc;
@@ -59,10 +60,35 @@ foreach my $term (@terms) {
 	}
 	$top_doc = $results[0];
     }
-    push @result_docs, $top_doc;
+    push @result_docs_tfidf, $top_doc;
 }
 
-is_deeply(\@result_docs, \@top_docs);
+is_deeply(\@result_docs_tfidf, \@top_docs);
+
+foreach my $term (@terms) {
+    my $top_doc;
+    eval {
+	$results = $index->search({ doc => $term },
+	                          { scoring_method => 'legacy_tfidf' });
+    };
+    if ($@) {
+	if (ref $@ && $@->isa('DBIx::TextIndex::Exception::Query') ) {
+	    $top_doc = 0;
+	} else {
+	    die $@ . "\n\n" . $@->trace;
+	}
+    } else {
+	my @results;
+	foreach my $doc_id (sort {$results->{$b} <=> $results->{$a}} keys %$results) {
+	    push @results, $doc_id;
+	}
+	$top_doc = $results[0];
+    }
+    push @result_docs_okapi, $top_doc;
+}
+
+is_deeply(\@result_docs_okapi, \@top_docs);
+
 
 
 $dbh->disconnect;

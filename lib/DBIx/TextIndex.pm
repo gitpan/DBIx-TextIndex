@@ -2,7 +2,7 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.18';
+our $VERSION = '0.19';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -10,6 +10,7 @@ XSLoader::load('DBIx::TextIndex', $VERSION);
 use Bit::Vector ();
 use Carp qw(carp croak);
 use DBIx::TextIndex::Exception;
+use DBIx::TextIndex::QueryParser;
 use DBIx::TextIndex::TermDocsCache;
 use HTML::Entities ();
 use Text::Unaccent qw(unac_string);
@@ -26,8 +27,8 @@ my $LAST_COLLECTION_TABLE_UPGRADE = '0.17';
 # Largest size word to be indexed
 my $MAX_WORD_LENGTH = 20;
 
-# Minimum size of word base before a "%" wildcard
-my $MIN_WILDCARD_LENGTH = 5;
+# Minimum size of word base before a wildcard
+my $MIN_WILDCARD_LENGTH = 4;
 
 # Used to screen stop words from the scoring process
 my $IDF_MIN_LEGACY_TFIDF = 0.2;
@@ -41,7 +42,7 @@ my $RESULT_THRESHOLD = 5000;
 my $ACCUMULATOR_LIMIT = 20000;
 
 # Clear out the hash key caches after this many searches
-my $SEARCH_CACHE_FLUSH_INTERVAL = 500;
+my $SEARCH_CACHE_FLUSH_INTERVAL = 1000;
 
 # Practical number of rows RDBMS can scan in acceptable amount of time
 my $PHRASE_THRESHOLD = 1000;
@@ -212,6 +213,8 @@ sub new {
         max_indexed_id => $self->max_indexed_id,
 	inverted_tables => $self->{INVERTED_TABLES},
     });
+
+    $self->{QP} = DBIx::TextIndex::QueryParser->new;
 
     # Number of searches performed on this instance
     $self->{SEARCH_COUNT} = 0;
@@ -546,20 +549,16 @@ sub search {
     throw $QRY( error => $ERROR{empty_query}) unless $query;
 
     my @field_nos;
-
-    foreach my $field (keys %$query) {
+    while (my ($field, $query_string) = each %$query) {
+	next unless $query_string =~ m/\S+/;
 	throw $GEN( error => "invalid field ($field) in search()" )
 	    unless exists $self->{FIELD_NO}->{$field};
+	my $fno = $self->{FIELD_NO}->{$field};
+	$self->{QUERY}->[$fno] = $self->{QP}->parse($query_string);
 	push @field_nos, $self->{FIELD_NO}->{$field};
     }
-
+    throw $QRY( error => $ERROR{'empty_query'} ) unless $#field_nos >= 0;
     @{$self->{QUERY_FIELD_NOS}} = sort { $a <=> $b } @field_nos;
-
-    foreach my $field (keys %$query) {
-	$self->{QUERY}->[$self->{FIELD_NO}->{$field}] = $query->{$field};
-    }
-
-    $self->_parse_query_fields;
 
     foreach my $mask_type (@MASK_TYPE) {
 	if ($args->{$mask_type}) {
@@ -587,11 +586,9 @@ sub search {
 	}
     }
 
-    $self->_fetch_vectors;
     $self->_optimize_or_search;
-    $self->_boolean_compare;
+    $self->_boolean_search;
     $self->_apply_mask;
-    $self->_phrase_search;
 
     if ($args->{unscored_search}) {
 	my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
@@ -601,7 +598,7 @@ sub search {
 
     my $scoring_method = $args->{scoring_method} || $self->{SCORING_METHOD};
 
-    my $results;
+    my $results = {};
     if ($scoring_method eq 'okapi') {
 	$results = $self->_search_okapi;
     } elsif ($scoring_method eq 'legacy_tfidf') {
@@ -609,19 +606,162 @@ sub search {
     } else {
 	throw $GEN( error => "Invalid scoring method $scoring_method, select okapi or legacy_tfidf");
     }
-    $self->{C}->flush;
+    $self->{C}->flush_term_docs;
 
     return $results;
 }
 
 
+sub _boolean_search {
+    my $self = shift;
+    $self->fetch_all_docs_vector;
+
+    my @query_fnos = @{$self->{QUERY_FIELD_NOS}};
+
+    if ($#query_fnos == 0) {
+	my $fno = $query_fnos[0];
+	$self->{RESULT_VECTOR} =
+	    $self->_boolean_search_field($fno, $self->{QUERY}->[$fno]);
+    } else {
+	my $maxid = $self->max_indexed_id + 1;
+	$self->{RESULT_VECTOR} = Bit::Vector->new($maxid);
+	foreach my $fno (@query_fnos) {
+	    my $field_vec =
+		$self->_boolean_search_field($fno, $self->{QUERY}->[$fno]);
+	    $self->{RESULT_VECTOR}->Union($self->{RESULT_VECTOR}, $field_vec);
+	}
+    }
+
+    foreach my $fno (@query_fnos) {
+	my %f_t;
+	foreach my $term (@{$self->{TERMS}->[$fno]}) {
+	    $f_t{$term} = $self->{C}->f_t($fno, $term);
+	    # query term frequency
+	    $self->{F_QT}->[$fno]->{$term}++;
+	}
+	# Set TERMS to frequency-sorted list
+	my @freq_sort = sort {$f_t{$a} <=> $f_t{$b}} keys %f_t;
+	$self->{TERMS}->[$fno] = \@freq_sort;
+    }
+}
+
+sub _boolean_search_field {
+    my $self = shift;
+    my ($fno, $clauses) = @_;
+
+    my $maxid = $self->max_indexed_id + 1;
+    my $field_vec = $self->{ALL_DOCS_VECTOR}->Clone;
+    my @or_vecs;
+
+    foreach my $clause (@$clauses) {
+	my $clause_vec;
+
+	if ($clause->{TYPE} eq 'QUERY') {
+	    $clause_vec =
+		$self->_boolean_search_field($fno, $clause->{QUERY});
+	} elsif ($clause->{TYPE} eq 'PLURAL') {
+	    $clause_vec = $self->_resolve_plural($fno, $clause->{TERM});
+	} elsif ($clause->{TYPE} eq 'WILD') {
+	    $clause_vec = $self->_resolve_wild($fno, $clause->{TERM});
+	} elsif ($clause->{TYPE} eq 'PHRASE'
+		 || $clause->{TYPE} eq 'IMPLICITPHRASE') {
+	    $clause_vec = $self->_resolve_phrase($fno, $clause);
+	} elsif ($clause->{TYPE} eq 'TERM') {
+	    $clause_vec = $self->{C}->vector($fno, $clause->{TERM});
+	} else {
+	    next;
+	}
+
+	# AND/OR terms will be used later in scoring process
+	unless ($clause->{MODIFER} eq 'NOT') {
+	    if ($clause->{TYPE} eq 'PHRASE'
+		|| $clause->{TYPE} eq 'IMPLICITPHRASE') {
+		foreach my $term_clause (@{$clause->{PHRASETERMS}}) {
+		    push @{$self->{TERMS}->[$fno]}, $term_clause->{TERM};
+		}
+	    } else {
+		push @{$self->{TERMS}->[$fno]}, $clause->{TERM};
+	    }
+	}
+
+	if ($clause->{MODIFIER} eq 'NOT') {
+	    $clause_vec->Flip;
+	    $field_vec->Intersection($field_vec, $clause_vec);
+	} elsif ($clause->{MODIFIER} eq 'AND'
+		 || $clause->{CONJ} eq 'AND') {
+	    $field_vec->Intersection($field_vec, $clause_vec);
+	} else {
+	    push @or_vecs, $clause_vec;
+	}
+    }
+    # Take the union of all the OR terms and intersect with result vector
+    if ($#or_vecs >= 0) {
+	my $all_ors_vec = Bit::Vector->new($maxid);
+	foreach my $or_vec (@or_vecs) {
+	    $all_ors_vec->Union($all_ors_vec, $or_vec);
+	}
+	$field_vec->Intersection($field_vec, $all_ors_vec);
+    }
+    return $field_vec;
+
+}
+
+sub _resolve_phrase {
+    my $self = shift;
+    my ($fno, $clause) = @_;
+    my $maxid = $self->max_indexed_id + 1;
+    my $and_vec = Bit::Vector->new($maxid);
+    $and_vec->Fill;
+    foreach my $term_clause (@{$clause->{PHRASETERMS}}) {
+	$and_vec->Intersection($and_vec,
+		       $self->{C}->vector($fno, $term_clause->{TERM}));
+    }
+    my @and_ids = $and_vec->Index_List_Read;
+    return $and_vec if $#and_ids > $self->{PHRASE_THRESHOLD};
+    return $and_vec if $#and_ids < 0;
+    my $phrase_ids = $self->_phrase_fullscan(\@and_ids, $fno, $clause->{TERM});
+    $and_vec->Empty;
+    $and_vec->Index_List_Store(@$phrase_ids);
+    return $and_vec;
+}
+
+sub _resolve_plural {
+    my $self = shift;
+    my ($fno, $term) = @_;
+    my $maxid = $self->max_indexed_id + 1;
+    my $terms_union = Bit::Vector->new($maxid);
+    foreach my $t ($term, $term.'s') {
+	$terms_union->Union($terms_union, $self->{C}->vector($fno, $t));
+    }
+    return $terms_union;
+}
+
+sub _resolve_wild {
+    my $self = shift;
+    my ($fno, $term) = @_;
+    my $maxid = $self->max_indexed_id + 1;
+    # FIXME: should we throw an exception? Returning empty vector for now
+    return Bit::Vector->new($maxid)
+	if length($term) < $self->{MIN_WILDCARD_LENGTH};
+    my $sql = $self->db_fetch_words($self->{INVERTED_TABLES}->[$fno]);
+    my $terms = $self->{INDEX_DBH}->selectcol_arrayref($sql, undef, "$term%");
+    my $terms_union = Bit::Vector->new($maxid);
+    foreach my $term (@$terms) {
+	$terms_union->Union($terms_union, $self->{C}->vector($fno, $term));
+    }
+    return $terms_union;
+}
+
 sub _flush_cache {
     my $self = shift;
     # flush masks every time
+    delete($self->{RESULTS_VECTOR});
     delete($self->{VALID_MASK});
     delete($self->{MASK});
     delete($self->{MASK_FETCH_LIST});
     delete($self->{MASK_VECTOR});
+    delete($self->{TERMS});
+    delete($self->{F_QT});
     # check to see if documents have been added since we last called new()
     my $new_max_indexed_id = $self->fetch_max_indexed_id;
     if (($new_max_indexed_id != $self->{MAX_INDEXED_ID})
@@ -629,7 +769,6 @@ sub _flush_cache {
 	# flush things that stick around
 	$self->max_indexed_id($new_max_indexed_id);
 	$self->{C}->max_indexed_id($new_max_indexed_id);
-	delete($self->{VECTOR});
 	delete($self->{ALL_DOCS_VECTOR});
 	delete($self->{W_D});
 	delete($self->{AVG_W_D});
@@ -1146,24 +1285,6 @@ sub _proximity_match {
     return $match;
 }
 
-
-sub _fetch_vectors {
-    my $self = shift;
-    my $maxid = $self->max_indexed_id + 1;
-    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
-	foreach my $term ( @{$self->{QUERY_WORDS}->[$fno]} ) {
-	    if (not $self->{VECTOR}->[$fno]->{$term}) {
-            	# vector for this word has not been yet defined in _parse_query
-		$self->{VECTOR}->[$fno]->{$term} =
-		    $self->{C}->vector($fno, $term);
-		# FIXME: redundant storage
-		$self->{DOCFREQ_T}->[$fno]->{$term} =
-		    $self->{C}->docfreq_t($fno, $term);
-	    }
-	}
-    }
-}
-
 sub _fetch_maxtf {
     my $self = shift;
     my $use_all_fields = shift;
@@ -1234,7 +1355,7 @@ sub _search_okapi {
     my $f_qt;                 # frequency of term in query
     my $f_t;                  # Number of documents that contain term
     my $W_d;                  # weight of document, sqrt((1 + log(words))**2)
-    my $aW_d;                 # average document weight in collection
+    my $avg_W_d;              # average document weight in collection
     my $doc_id;               # document id
     my $f_dt;                 # frequency of term in given doc_id
     my $idf = 0;
@@ -1251,32 +1372,18 @@ sub _search_okapi {
     my $result_min = $self->{RESULT_VECTOR}->Min;
 
     foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
-	$aW_d = $self->{AVG_W_D}->[$fno];
+	$avg_W_d = $self->{AVG_W_D}->[$fno];
 	foreach my $term (@{$self->{TERMS}->[$fno]}) {
 	    $f_t = $self->{C}->f_t($fno, $term);
 	    $idf =  log(($N - $f_t + 0.5) / ($f_t + 0.5));
 	    next if $idf < $IDF_MIN_OKAPI;
 	    $f_qt = $self->{F_QT}->[$fno]->{$term};     # freq of term in query
 	    my $w_qt = (($k3 + 1) * $f_qt) / ($k3 + $f_qt); # query term weight
-	    my $term_docs = $self->{C}->term_docs_arrayref($fno, $term);
-	    for (my $i = 0; ($i < (2 * $f_t))
-		 && ($acc_size < $ACCUMULATOR_LIMIT) ; $i += 2) {
-		$doc_id = $term_docs->[$i];
-		last if $doc_id > $result_max;
-		next if $doc_id < $result_min;
-		next unless $self->{RESULT_VECTOR}->bit_test($doc_id);
-		$f_dt = $term_docs->[$i + 1];
-		$W_d = $self->{W_D}->[$fno]->[$i];
-
-		my $TF = ( (($k1 + 1) * $f_dt) /
-		       ($k1 * ((1 - $b) + (($b * $W_d)/$aW_d)) + $f_dt ) );
-
-		$score{$doc_id} += $idf * $TF * $w_qt;
-
-		$acc_size = scalar keys %score;
-	    }
+	    my $term_docs = $self->{C}->term_docs($fno, $term);
+	    score_term_docs_okapi($term_docs, \%score, $self->{RESULT_VECTOR}, $ACCUMULATOR_LIMIT, $result_min, $result_max, $idf, $f_t, $self->{W_D}->[$fno], $avg_W_d, $w_qt, $k1, $b);
 	}
     }
+
     unless (scalar keys %score) {
 	if (not @{$self->{STOPLISTED_QUERY}}) {
 	    throw $QRY( error => $ERROR{no_results} );
@@ -1299,11 +1406,17 @@ sub _search_legacy_tfidf {
 
     # Special case: only one word in query and word is not very selective,
     # so don't bother tf-idf scoring, just return results sorted by docfreq_tt
-    my $and_plus_or = $self->{OR_WORD_COUNT} + $self->{AND_WORD_COUNT};
+    my @and_plus_or_words;
+    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
+	push @and_plus_or_words, @{$self->{TERMS}->[$fno]};
+    }
+
+    my $and_plus_or = $#and_plus_or_words + 1;
     if ($and_plus_or == 1 && $#result_docs > $self->{RESULT_THRESHOLD}) {
+	print "here 2\n";
 
 	my $fno = $self->{QUERY_FIELD_NOS}->[0];
-	my $word = $self->{QUERY_OR_WORDS}->[$fno]->[0] || $self->{QUERY_AND_WORDS}->[$fno]->[0];
+	my $word = $and_plus_or_words[0];
 
 	my $f_t = $self->{C}->f_t($fno, $word);
 
@@ -1336,9 +1449,7 @@ sub _search_legacy_tfidf {
     $self->_fetch_maxtf;
     foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
       WORD:
-	foreach my $word (@{$self->{QUERY_OR_WORDS}->[$fno]},
-			  @{$self->{QUERY_AND_WORDS}->[$fno]} ) {
-	    
+	foreach my $word (@{$self->{TERMS}->[$fno]}) {
 	    my $f_t = $self->{C}->f_t($fno, $word);
 	    # next WORD unless defined $f_t;
 	    $f_t = 1 unless defined $f_t;
@@ -1394,104 +1505,66 @@ sub _format_stoplisted_error {
 #
 # _optimize_or_search()
 #
-#   If query contains large number of OR words,
-#   turn the rarest words into AND words to reduce result set size
+#   If query contains large number of OR terms,
+#   turn the rarest terms into AND terms to reduce result set size
 #   before scoring.
 #
-#   Algorithm: if there are four or less query words turn the two
-#   least frequent OR words into AND words. For five or more query
-#   words, make the three least frequent words OR words into AND words.
+#   Algorithm: if there are four or less query terms turn the two
+#   least frequent OR terms into AND terms. For five or more query
+#   terms, make the three least frequent OR terms into AND terms.
 #
-#   Does nothing if AND words already exist
+#   Does nothing if AND or NOT terms already exist
 #
 
 sub _optimize_or_search {
     my $self = shift;
-
     foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
 
-	my $or_word_count = 0; my $and_word_count = 0;
+	my @clauses = @{$self->{QUERY}->[$fno]};
 
-	$or_word_count = $#{ $self->{QUERY_OR_WORDS}->[$fno] } + 1;
-	$and_word_count = $#{ $self->{QUERY_AND_WORDS}->[$fno] } + 1;
+	my %f_t;
+	my @or_clauses;
+	my $or_term_count = 0;
+	foreach my $clause (@clauses) {
+	    return if exists $clause->{CONJ};           # user explicitly asked
+	    return if ($clause->{MODIFIER} eq 'NOT'     # for boolean query 
+		      || $clause->{MODIFIER} eq 'AND');
+	    if ($clause->{TYPE} eq 'TERM'
+		|| $clause->{TYPE} eq 'PLURAL'
+		|| $clause->{TYPE} eq 'WILDCARD') {
 
-	return if $and_word_count > 0;
-	return if $or_word_count < 1;
+		if ($clause->{MODIFIER} eq 'OR') {
+		    $or_term_count++;
+		    my $term = $clause->{TERM};
+		    $f_t{$term} = $self->{C}->f_t($fno, $term) || 0;
+		    push @or_clauses, $clause;
+		}
+	    } elsif ($clause->{TYPE} eq 'IMPLICITPHRASE'
+		     || $clause->{TYPE} eq 'PHRASE') {
+		if ($clause->{MODIFIER} eq 'OR') {
+		    $clause->{MODIFIER} = 'AND';
+		}
+	    } else {
+		return;
+	    }
+	}
+	return if $or_term_count < 1;
 
-	# sort in order of docfreq_t
-	my @or_words = sort { $self->{DOCFREQ_T}->[$fno]->{$a} <=> $self->{DOCFREQ_T}->[$fno]->{$b} } @{$self->{QUERY_OR_WORDS}->[$fno]};
+	# sort in order of f_t
+	my @f_t_sorted =
+	    sort { $f_t{$a->{TERM}} <=> $f_t{$b->{TERM}} } @or_clauses;
 	
-	my @new_and_words;
-	if ($or_word_count == 1) {
-	    push @new_and_words, shift @or_words;
-	    $or_word_count--;
-	    $and_word_count++;
-	} elsif ($or_word_count >=2 && $or_word_count <= 4) {
-	    push @new_and_words, shift @or_words;
-	    push @new_and_words, shift @or_words;
-	    $or_word_count  -= 2;
-	    $and_word_count += 2;
-	} elsif ($or_word_count > 4) {
-	    push @new_and_words, shift @or_words;
-	    push @new_and_words, shift @or_words;
-	    push @new_and_words, shift @or_words;
-	    $or_word_count  -= 3;
-	    $and_word_count += 3;
+	if ($or_term_count >= 1) {
+	    $f_t_sorted[0]->{MODIFIER} = 'AND';
 	}
-
-	$self->{QUERY_OR_WORDS}->[$fno] = \@or_words;
-	push @{ $self->{QUERY_AND_WORDS}->[$fno] }, @new_and_words;
-
-	# FIXME: should these be cumulative across fields?
-	$self->{OR_WORD_COUNT} += $or_word_count;
-	$self->{AND_WORD_COUNT} += $and_word_count;
-
+	if ($or_term_count >= 2) {
+	    $f_t_sorted[1]->{MODIFIER} = 'AND';
+	}
+	if ($or_term_count > 4) {
+	    $f_t_sorted[2]->{MODIFIER} = 'AND';
+	}
     }
 }
-
-sub _boolean_compare {
-
-    my $self = shift;
-
-    my $vec_size = $self->{MAX_INDEXED_ID} + 1;
-
-    my @vectors;
-    my $i = 0;
-    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
-	$vectors[$i] = Bit::Vector->new($vec_size);
-
-	if ($self->{OR_WORD_COUNT} < 1) {
-	    $vectors[$i]->Fill;
-	} else {
-	    $vectors[$i]->Empty;
-	}
-
-	foreach my $word ( @{$self->{QUERY_OR_WORDS}->[$fno]} ) {
-	    $vectors[$i]->Union($vectors[$i],
-				 $self->{VECTOR}->[$fno]->{$word});
-	}
-
-	foreach my $word ( @{$self->{QUERY_AND_WORDS}->[$fno]} ) {
-	    $vectors[$i]->Intersection($vectors[$i],
-					$self->{VECTOR}->[$fno]->{$word});
-	}
-
-	foreach my $word ( @{$self->{QUERY_NOT_WORDS}->[$fno]} ) {
-	    $self->{VECTOR}->[$fno]->{$word}->Flip;
-	    $vectors[$i]->Intersection($vectors[$i],
-					$self->{VECTOR}->[$fno]->{$word});
-	}
-	$i++;
-    }
-
-    $self->fetch_all_docs_vector;
-    $self->{RESULT_VECTOR} = $self->{ALL_DOCS_VECTOR}->Clone;
-
-    foreach my $vector (@vectors) {
-	$self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR}, $vector);
-    }
-}
-
 
 sub _apply_mask {
 
@@ -1592,213 +1665,6 @@ sub _fetch_mask {
 
     }
     return $mask_count;
-}
-
-sub _parse_query_fields {
-    my $self = shift;
-
-    # Quick check to make sure we have a query in at least on field
-    my $have_query = 0;
-    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
-	my $query = $self->{QUERY}->[$fno];
-	$have_query++ if $query =~ m/\S+/;
-
-    }
-    throw $QRY( error => $ERROR{'empty_query'} ) unless $have_query;
-
-    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
-	$self->_parse_query( $self->{QUERY}->[$fno], $fno );
-    }
-
-}
-
-sub _parse_query {
-
-    my $self = shift;
-    my ($query, $fno) = @_;
-
-    my $string_length = length($query);
-
-    my $in_phrase = 0;
-    my $phrase_count = 0;
-    my $quote_count = 0;
-    my $word_count = 0;
-    my @raw_phrase = ();
-    my $term = "";
-    my (@phrase, @words, @and_words, @or_words, @not_words, @all_words,
-	@proximity, @wildcards, @highlight);
-
-    $query = $self->_lc_and_unac($query);
-
-    for my $position (0 .. ($string_length - 1)) {
-	my $char = substr($query, $position, 1);
-	if ($char eq '"') {
-	    $quote_count++;
-	}
-	$phrase_count = int(($quote_count - 1)/ 2);
-	if ($quote_count % 2 != 0 && $char ne '"') {
-	    $raw_phrase[$phrase_count] .= $char;
-	} else {
-	    $term .= $char;
-	}
-    }
-
-    if ($quote_count % 2 != 0) {
-	throw $QRY( error => $ERROR{'quote_count'} );
-    }
-
-    @words = grep {
-
-	$_ =~ tr/[a-zA-Z0-9*%+-]//cd;
-	length($_) > 0;
-
-    } split(/\s+/, $term);
-
-    foreach my $term (@words) {
-	$term =~ m/^([+-])?(\w+)([%*])?$/;
-	my $op = $1;
-	my $pword = $2;
-	my $wild = $3;
-
-	$pword = substr($pword, 0, $self->{MAX_WORD_LENGTH});
-	next if ($self->_stoplisted($pword));
-
-	print "parsed word: $pword".($wild ? "; wildcard: $wild" : '')."\n"
-	    if $PA;
-	my @vec;
-	my $setvector = 0;
-	my $maxid = $self->max_indexed_id + 1;
-	if ($wild eq '%') {
-	    next if (length($pword) < $self->{MIN_WILDCARD_LENGTH});
-
-	    my $table = $self->{INVERTED_TABLES}->[$fno];
-	    my $sql = $self->db_fetch_words($table);
-	    my $words = $self->{INDEX_DBH}->selectcol_arrayref($sql,
-				       undef, "$pword%");
-
-	    foreach my $term (@{$words}) {
-		if ($op eq '+') {
-		    push(@vec, $self->{C}->vector($fno, $term));
-		    $setvector = 1;
-		    push @all_words, $term;
-		    next;
-		} elsif ($op eq '-') {
-		    push @not_words, $term;
-		} else {
-		    push @or_words, $term;
-		}
-		push @all_words, $term;
-		push @wildcards, $wild;
-	    }
-
-	    push(@highlight, $pword);
-
-	    if ($setvector) {
-		push(@and_words, $pword);
-		push(@all_words, $pword);
-		push(@wildcards, $wild);
-		my $unionvec = Bit::Vector->new($maxid);
-		foreach my $vec (@vec) {
-		    $unionvec->Union($unionvec, $vec);
-		}
-		$self->{VECTOR}->[$fno]->{$pword} = $unionvec;
-	    }
-	} elsif ($wild eq '*') {
-	    if ($op eq '+') {
-		push(@vec, $self->{C}->vector($fno, $pword) );
-		push(@vec, $self->{C}->vector($fno, $pword.'s') );
-
-		push(@and_words, $pword);
-
-		my $unionvec = Bit::Vector->new($maxid);
-		foreach my $vec (@vec) {
-		    $unionvec->Union($unionvec, $vec);
-		}
-		$self->{VECTOR}->[$fno]->{$pword} = $unionvec;
-	    } elsif ($op eq '-') {
-		push (@not_words, $pword);
-		push (@not_words, $pword.'s');
-	    } else {
-		push (@or_words, $pword);
-		push (@or_words, $pword.'s');
-	    }
-
-	    push(@all_words, $pword);
-	    push(@all_words, $pword.'s');
-	    push(@highlight, $pword);
-	    push(@wildcards, $wild);
-	} else {  # Not wild
-	    if ($op eq '+') {
-		push @and_words, $pword;
-	    } elsif ($op eq '-') {
-		push @not_words, $pword;
-	    } else {
-		push @or_words, $pword;
-	    }
-
-	    push @all_words, $pword;
-	    push(@highlight, $pword);
-	    push(@wildcards, undef);
-	}
-    }
-
-    foreach my $phrase (@raw_phrase) {
-	$phrase =~ s/^:(\d+)\s+(.+)$/$2/;
-	my $proximity = $1;
-	my @split_phrase = split/\s+/, $phrase;
-	$word_count = @split_phrase;
-	if ($word_count == 1) {
-	    if (not $self->_stoplisted($phrase)) {
-		push @or_words, $phrase;
-		push @all_words, $phrase;
-		push(@highlight, $phrase);
-		push(@wildcards, undef);
-	    }
-	} elsif ($phrase =~ m/^\s*$/) {
-	    next;
-	} else {
-	    my $stop = 0;
-	    my @p_words;
-	    foreach my $term (@split_phrase) {
-		if (not $self->_stoplisted($term)) {
-		    push @p_words, $term;
-		} else {
-		    $stop = 1;
-		    last;
-		}
-	    }
-	    if (not $stop) {
-		push @and_words, @p_words;
-		push @all_words, @p_words;
-		push (@phrase, $phrase);
-		push (@proximity, $proximity) if ($self->{PINDEX});
-	    }
-	}
-    }	#  end of phrase processing
-
-    $self->{QUERY_PHRASES}->[$fno] = \@phrase;
-    $self->{QUERY_PROXIMITY}->[$fno] = \@proximity
-	if ($self->{PINDEX});
-
-    $self->{QUERY_WILDCARDS}->[$fno] = \@wildcards;
-    $self->{QUERY_HIGHLIGHT}->[$fno] = \@highlight;
-
-    $self->{QUERY_OR_WORDS}->[$fno] = \@or_words;
-    $self->{QUERY_AND_WORDS}->[$fno] = \@and_words;
-    $self->{QUERY_NOT_WORDS}->[$fno] = \@not_words;
-    $self->{QUERY_WORDS}->[$fno] = \@all_words;
-
-    $self->{HIGHLIGHT} = join '|', @all_words;
-
-    my %f_t;
-    foreach my $term (@or_words, @and_words) {
-	$f_t{$term} = $self->{C}->f_t($fno, $term);
-	# query term frequency
-	$self->{F_QT}->[$fno]->{$term}++;
-    }
-    # Set TERMS to frequency-sorted list
-    my @freq_sort = sort {$f_t{$a} <=> $f_t{$b}} keys %f_t;
-    $self->{TERMS}->[$fno] = \@freq_sort;
 }
 
 # Set everything to lowercase and change accented characters to
@@ -2143,7 +2009,7 @@ DBIx::TextIndex - Perl extension for full-text searching in SQL databases
      max_word_length => 12,
      result_threshold => 5000,
      phrase_threshold => 1000,
-     min_wildcard_length => 5,
+     min_wildcard_length => 4,
      decode_html_entities => 1,
      print_activity => 0
  });
@@ -2523,24 +2389,23 @@ Deletes a single mask from the mask table in the database.
 
 =head1 PARTIAL PATTERN MATCHING USING WILDCARDS
 
-You can use wildcard characters "%" or "*" at end of a word
+You can use wildcard characters "*" or "?" at end of a word
 to match all words that begin with that word. Example:
 
-    the "%" character means "match any characters"
+    the "*" character means "match any characters"
 
-    car%	==> matches "car", "cars", "careful", "cartel", ....
+    car*	==> matches "car", "cars", "careful", "cartel", ....
 
 
-    the "*" character means "match also the plural form"
+    the "?" character means "match also the plural form"
 
-    car*	==> matches only "car" or "cars"
+    car?	==> matches only "car" or "cars"
 
-The option B<min_wildcard_length> is used to set the minimum length of
-word base appearing before the "%" wildcard character.
-Defaults to five characters to avoid
-selection of excessive amounts of word combinations. Unless this option
-is set to a lower value, the examle above (car%) wouldn't produce
-any results.
+The option B<min_wildcard_length> is used to set the minimum number
+or characters appearing before the "*" wildcard character.
+The default is four characters to avoid selection of excessive amounts
+of word combinations.  Unless this option is set to a lower value, the
+example above (car*) wouldn't produce any results.
 
 =head1 HIGHLIGHTING OF QUERY WORDS OR PATTERNS IN RESULTING DOCUMENTS
 
@@ -2602,6 +2467,12 @@ See the "GNU General Public License" for more details.
 
 =head1 ACKNOWLEDGEMENTS
 
+Thanks to the lucy project (http://www.seg.rmit.edu.au/lucy/) for
+ideas and code for the Okapi scoring function.
+
+Simon Cozens' Lucene::QueryParser module was adapted to create the
+DBIx::TextIndex QueryParser module.
+
 Special thanks to Tomas Styblo, for proximity index support, Czech
 language support, stoplists, highlighting, document removal and many
 other improvements.
@@ -2616,11 +2487,9 @@ Bit::Vector is required by DBIx::TextIndex.
 
 =head1 BUGS
 
-Uses quite a bit of memory.
-
-Parser is not very good.
-
 Documentation is not complete.
+
+Phrase indexing is not scalable.
 
 Please feel free to email me (dkoch@bizjournals.com) with any questions
 or suggestions.

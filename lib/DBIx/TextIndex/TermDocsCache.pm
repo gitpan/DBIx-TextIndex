@@ -2,7 +2,7 @@ package DBIx::TextIndex::TermDocsCache;
 
 use strict;
 
-our $VERSION = '0.17';
+our $VERSION = '0.18.90';
 
 use Bit::Vector;
 #use DBIx::TextIndex;
@@ -29,16 +29,34 @@ sub _init {
 sub max_indexed_id {
     my $self = shift;
     if (@_) {
-	$self->flush;
+	$self->flush_all;
 	$self->{MAX_INDEXED_ID} = $_[0];
     }
     return $self->{MAX_INDEXED_ID};
 }
 
-sub flush {
+sub flush_all {
+    my $self = shift;
+    $self->flush_bit_vectors;
+    $self->flush_term_docs;
+}
+
+sub flush_bit_vectors {
+    my $self = shift;
+    delete($self->{VECTOR});
+}
+
+sub flush_term_docs {
     my $self = shift;
     delete($self->{TERM_DOCS});
     delete($self->{DOCFREQ_T});
+}
+
+sub term_docs {
+    my $self = shift;
+    my ($fno, $term) = @_;
+    $self->_fetch_term_docs($fno, $term) unless exists $self->{TERM_DOCS}->[$fno]->{$term};
+    return $self->{TERM_DOCS}->[$fno]->{$term};
 }
 
 sub term_docs_hashref {
@@ -65,9 +83,14 @@ sub term_doc_ids_arrayref {
 
 sub vector {
     my $self = shift;
-    my $doc_ids = $self->term_doc_ids_arrayref(@_);
+    my ($fno, $term) = @_;
+    if ($self->{VECTOR}->[$fno]->{$term}) {
+	return $self->{VECTOR}->[$fno]->{$term};
+    }
+    my $doc_ids = $self->term_doc_ids_arrayref($fno, $term);
     my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
     $vector->Index_List_Store(@$doc_ids);
+    $self->{VECTOR}->[$fno]->{$term} = $vector;
     return $vector;
 }
 
@@ -94,20 +117,6 @@ sub _fetch_term_docs {
 
     ($self->{DOCFREQ_T}->[$fno]->{$term}, $self->{TERM_DOCS}->[$fno]->{$term})
 	= $self->{DBH}->selectrow_array($sql, undef, $term);
-}
-
-sub _term_docs {
-    my $self = shift;
-    my ($fno, $term) = @_;
- 
-    my $sql = $self->db_fetch_term_docs($self->{INVERTED_TABLES}->[$fno]);
-    my $sth = $self->{DBH}->prepare($sql);
-    $sth->execute($term);
-
-    my $docs;
-    $sth->bind_col(1, \$docs);
-    $sth->fetch;
-    return $docs;
 }
 
 sub _docfreq_t {

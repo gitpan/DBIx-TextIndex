@@ -2,6 +2,19 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.19
+    Rewrote query parser.  Now we support nested subqueries in parentheses,
+    AND/OR/NOT operators, and existing '+/-' operators
+    (this OR that) AND (foo OR bar) +"this phrase" -"not this phrase"
+
+    Changed prefix query syntax slightly: '*' is now prefix operator, '?'
+    is plural operator:
+      dog*  matches dog, dogs, dogma, dogmatic, dogmatically
+      cat?  matches cat, cats
+
+    Rewrote critical loop of Okapi scoring as XSUB.  Search over large
+    collections is much faster.
+
 0.18
     Fixed bug where Okapi function did not score multiple fields
 

@@ -25,7 +25,7 @@ SYNOPSIS
          max_word_length => 12,
          result_threshold => 5000,
          phrase_threshold => 1000,
-         min_wildcard_length => 5,
+         min_wildcard_length => 4,
          decode_html_entities => 1,
          print_activity => 0
      });
@@ -361,22 +361,22 @@ SUPPORT FOR SEARCH MASKS
         Deletes a single mask from the mask table in the database.
 
 PARTIAL PATTERN MATCHING USING WILDCARDS
-        You can use wildcard characters "%" or "*" at end of a word to match
+        You can use wildcard characters "*" or "?" at end of a word to match
         all words that begin with that word. Example:
 
-            the "%" character means "match any characters"
+            the "*" character means "match any characters"
 
-            car%        ==> matches "car", "cars", "careful", "cartel", ....
+            car*        ==> matches "car", "cars", "careful", "cartel", ....
 
-            the "*" character means "match also the plural form"
+            the "?" character means "match also the plural form"
 
-            car*        ==> matches only "car" or "cars"
+            car?        ==> matches only "car" or "cars"
 
-        The option min_wildcard_length is used to set the minimum length of
-        word base appearing before the "%" wildcard character. Defaults to
-        five characters to avoid selection of excessive amounts of word
-        combinations. Unless this option is set to a lower value, the examle
-        above (car%) wouldn't produce any results.
+        The option min_wildcard_length is used to set the minimum number or
+        characters appearing before the "*" wildcard character. The default
+        is four characters to avoid selection of excessive amounts of word
+        combinations. Unless this option is set to a lower value, the
+        example above (car*) wouldn't produce any results.
 
 HIGHLIGHTING OF QUERY WORDS OR PATTERNS IN RESULTING DOCUMENTS
         A module HTML::Highlight can be used either independently or
@@ -430,6 +430,12 @@ DISCLAIMER
         See the "GNU General Public License" for more details.
 
 ACKNOWLEDGEMENTS
+        Thanks to the lucy project (http://www.seg.rmit.edu.au/lucy/) for
+        ideas and code for the Okapi scoring function.
+
+        Simon Cozens' Lucene::QueryParser module was adapted to create the
+        DBIx::TextIndex QueryParser module.
+
         Special thanks to Tomas Styblo, for proximity index support, Czech
         language support, stoplists, highlighting, document removal and many
         other improvements.
@@ -443,11 +449,9 @@ ACKNOWLEDGEMENTS
         Bit::Vector is required by DBIx::TextIndex.
 
 BUGS
-        Uses quite a bit of memory.
-
-        Parser is not very good.
-
         Documentation is not complete.
+
+        Phrase indexing is not scalable.
 
         Please feel free to email me (dkoch@bizjournals.com) with any
         questions or suggestions.
@@ -458,6 +462,19 @@ SEE ALSO
 Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
+
+0.19
+    Rewrote query parser.  Now we support nested subqueries in parentheses,
+    AND/OR/NOT operators, and existing '+/-' operators
+    (this OR that) AND (foo OR bar) +"this phrase" -"not this phrase"
+
+    Changed prefix query syntax slightly: '*' is now prefix operator, '?'
+    is plural operator:
+      dog*  matches dog, dogs, dogma, dogmatic, dogmatically
+      cat?  matches cat, cats
+
+    Rewrote critical loop of Okapi scoring as XSUB.  Search over large
+    collections is much faster.
 
 0.18
     Fixed bug where Okapi function did not score multiple fields

@@ -4,15 +4,95 @@
 
 #include "ppport.h"
 
+#define TEXTINDEX_DEREF_AV(ref,av) ( ref && SvROK(ref) && \
+             (av = (AV*)SvRV(ref)) && \
+             SvTYPE(av) == SVt_PVAV )
+
+#define TEXTINDEX_DEREF_HV(ref,hv) ( ref && SvROK(ref) && \
+             (hv = (HV*)SvRV(ref)) && \
+             SvTYPE(hv) == SVt_PVHV ) 
+
+#define TEXTINDEX_DEREF_BITVEC(ref, obj, ptr) ( ref && SvROK(ref) && \
+             (obj = (SV*)SvRV(ref)) && \
+             SvOBJECT(obj) && \
+             SvREADONLY(obj) && \
+             (SvTYPE(obj) == SVt_PVMG) && \
+             (ptr = (unsigned int *)SvIV(obj)) )
+
 #define TEXTINDEX_ERROR(error) \
     croak("DBIx::TextIndex::%s(): %s", GvNAME(CvGV(cv)), error);
 
+#define BITVEC_TEST_BIT(address,index) \
+    ((*(address+(index>>5)) & BITMASKS[index & 31]) != 0)
+
+static unsigned int *BITMASKS;
+
+void bitvec_boot(void);
+unsigned int get_doc_freq_pair(char *, unsigned int, unsigned int, unsigned int *, unsigned int *g);
+int bitvec_test_bit(unsigned int *, unsigned int);
+
+int bitvec_test_bit(unsigned int *addr, unsigned int index) {
+    if (index < *(addr - 3))
+        return( BITVEC_TEST_BIT(addr,index) );
+    else
+        return( 0 );
+}
+
+void bitvec_boot(void) {
+    int i;
+    BITMASKS = (unsigned int *) malloc((size_t) 128); /* Assume 32 bit word */
+    for (i = 0; i < 32; i++) {
+        BITMASKS[i] = (1 << i);
+    }
+}
+
+unsigned int get_doc_freq_pair(char *string, unsigned int pos, unsigned int last_doc, unsigned int *doc, unsigned int *freq) {
+    unsigned int value = 0;
+    char temp;
+    int got_freq = 0;
+    int freq_is_next = 0;
+    while (! got_freq) {
+	value = *(string + pos); pos++;
+	if (value & 0x80)
+	{
+	    value &= 0x7f;
+	    do
+	    {
+		temp = *(string + pos); pos++;
+		value = (value << 7) + (temp & 0x7f);
+	    } while (temp & 0x80);
+	}
+
+	if ( freq_is_next ) {
+	    *freq = value;
+            got_freq = 1;
+	    continue;
+        }
+
+	*doc = last_doc + (value >> 1);
+	if (value & 1) {
+            *freq = 1;
+            got_freq = 1;
+	} else {
+	    freq_is_next = 1;
+	}
+    }
+    return pos;
+}
+
 MODULE = DBIx::TextIndex		PACKAGE = DBIx::TextIndex
+
+PROTOTYPES: DISABLE
+
+BOOT:
+{
+    /* FIXME: error check */
+    bitvec_boot();
+}
 
 void
 term_docs_hashref(packed)
-SV *packed
-PROTOTYPE: $
+  SV *packed
 PPCODE:
 {
     HV *freqs;
@@ -60,8 +140,7 @@ PPCODE:
 
 void
 term_docs_arrayref(packed)
-SV *packed
-PROTOTYPE: $
+  SV *packed
 PPCODE:
 {
     AV *results;
@@ -110,8 +189,7 @@ PPCODE:
 
 void
 term_doc_ids_arrayref(packed)
-SV *packed
-PROTOTYPE: $
+  SV *packed
 PPCODE:
 {
     AV *results;
@@ -159,8 +237,7 @@ PPCODE:
 
 void
 term_docs_array(packed)
-SV *packed
-PROTOTYPE: $
+  SV *packed
 PPCODE:
 {
     char *string;
@@ -194,7 +271,7 @@ PPCODE:
         }
 
 	doc += value >> 1;
-	   XPUSHs(sv_2mortal(newSViv(doc)));
+	    XPUSHs(sv_2mortal(newSViv(doc)));
 	if (value & 1) {
 	    XPUSHs(sv_2mortal(newSViv(1)));
 	} else {
@@ -206,8 +283,7 @@ PPCODE:
 
 void
 term_docs_and_freqs(packed)
-SV *packed
-PROTOTYPE: $
+  SV *packed
 PPCODE:
 {
     AV *docs;
@@ -260,8 +336,7 @@ PPCODE:
 
 void
 pack_vint(ints_arrayref)
-SV *ints_arrayref
-PROTOTYPE: $
+  SV *ints_arrayref
 PPCODE:
 {
     char *packed;
@@ -269,10 +344,7 @@ PPCODE:
     I32 length = 0;
     unsigned int i, j, value;
     register unsigned long buff;
-    if ( ! ( SvROK(ints_arrayref) &&
-             (term_freqs = (AV*)SvRV(ints_arrayref)) &&
-             SvTYPE(term_freqs) == SVt_PVAV                   )   )
-    {
+    if (! TEXTINDEX_DEREF_AV(ints_arrayref, term_freqs )) {
         TEXTINDEX_ERROR("args must be arrayref");
     }
     length = av_len(term_freqs);
@@ -304,8 +376,7 @@ PPCODE:
 
 void
 pack_term_docs(term_docs_arrayref)
-SV *term_docs_arrayref
-PROTOTYPE: $
+  SV *term_docs_arrayref
 PPCODE:
 {
     char *packed;
@@ -371,9 +442,8 @@ PPCODE:
 
 void
 pack_term_docs_append_vint(packed, vint)
-SV *packed
-SV *vint
-PROTOTYPE: $$
+  SV *packed
+  SV *vint
 PPCODE:
 {
     char *str_a, *str_b, *newpack;
@@ -501,4 +571,87 @@ PPCODE:
     }
     XPUSHs(sv_2mortal(newSVpv((char *)newpack, j)));
     Safefree(newpack);
+}
+
+void
+score_term_docs_okapi(term_docs, score_hashref, bitvec_ref, acc_lim_SV, \
+                      res_min_SV, res_max_SV, idf_SV, f_t_SV, W_D_arrayref, \
+                      avg_W_d_SV, w_qt_SV, k1_SV, b_SV)
+  SV *term_docs
+  SV *score_hashref
+  SV *bitvec_ref
+  SV *acc_lim_SV
+  SV *res_min_SV
+  SV *res_max_SV
+  SV *f_t_SV
+  SV *idf_SV
+  SV *W_D_arrayref
+  SV *avg_W_d_SV
+  SV *w_qt_SV
+  SV *k1_SV
+  SV *b_SV
+PPCODE:
+{
+    int          acc_size,
+                 length;
+    unsigned int acc_lim    =  SvIV(acc_lim_SV),
+                 f_t        =  SvIV(f_t_SV),
+                 res_min    =  SvIV(res_min_SV), 
+                 res_max    =  SvIV(res_max_SV),
+                 doc,
+                 last_doc,
+                 f_dt,
+                 old_score,
+                 i,
+                 pos,
+                 *bitvec;
+
+    double       idf        =  SvNV(idf_SV),
+                 avg_W_d    =  SvNV(avg_W_d_SV),
+                 w_qt       =  SvNV(w_qt_SV),
+                 k1         =  SvNV(k1_SV),
+                 b          =  SvNV(b_SV),
+                 W_d,
+                 TF,
+                 doc_score;
+    char *string;
+    SV *bitvec_obj;
+    SV *doc_id;
+    AV *W_D;
+    HV *score;
+    HE *score_he;
+    STRLEN len;
+
+    string  = SvPV(term_docs, len);
+    length  = len;
+
+    if (! TEXTINDEX_DEREF_AV(W_D_arrayref, W_D)) {
+        TEXTINDEX_ERROR("arg9 must be arrayref");
+    }
+    if (! TEXTINDEX_DEREF_HV(score_hashref, score)) {
+        TEXTINDEX_ERROR("arg2 must be arrayref");
+    }
+    if (! TEXTINDEX_DEREF_BITVEC(bitvec_ref, bitvec_obj, bitvec)) {
+        TEXTINDEX_ERROR("arg3 must be Bit::Vector object");
+    }
+
+    pos = 0;
+    last_doc = 0;
+    acc_size = 0;
+    for (i = 0; (i < f_t) && (acc_size < acc_lim); i++) {
+	pos = get_doc_freq_pair(string, pos, last_doc, &doc, &f_dt);
+	last_doc = doc;
+	if (doc > res_max) break;
+        if (doc < res_min) continue;
+        if ( ! bitvec_test_bit(bitvec, doc) ) continue;
+        W_d = SvNV(*av_fetch(W_D, doc, 0));
+        TF = (((k1 + 1) * f_dt) / (k1 * ((1 - b)+((b * W_d)/avg_W_d)) + f_dt));
+        doc_score = idf * TF * w_qt;
+        doc_id = newSViv(doc);  
+        score_he = hv_fetch_ent(score, doc_id, TRUE, 0);
+        if (old_score = SvIV(HeVAL(score_he)))
+            doc_score += old_score;
+        hv_store_ent(score, doc_id, newSVnv(doc_score), 0);
+        acc_size = HvKEYS(score);
+    }
 }
