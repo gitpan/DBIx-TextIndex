@@ -2,10 +2,11 @@ package DBIx::TextIndex;
 
 use strict;
 
-use Bit::Vector;
+use Bit::Vector ();
 use Carp qw(carp croak);
+use Data::Dumper qw(Dumper);
 
-$DBIx::TextIndex::VERSION = '0.04';
+$DBIx::TextIndex::VERSION = '0.05';
 
 # Largest size word to be indexed
 my $MAX_WORD = 30;
@@ -163,7 +164,14 @@ sub add_document {
 
     $self->_commit_documents;
 
+}
 
+sub unscored_search {
+    my $self = shift;
+    my $query = shift;
+    my $args = shift;
+    $args->{unscored_search} = 1;
+    return $self->search($query, $args);
 }
 
 sub search {
@@ -219,6 +227,11 @@ sub search {
     $self->_boolean_compare;
     $self->_apply_mask;
     $self->_phrase_search;
+
+    if ($args->{unscored_search}) {
+	my @result_documents = $self->{RESULT_VECTOR}->Index_List_Read;
+	return \@result_documents;
+    }
 
     my $results = $self->_search;
 
@@ -304,6 +317,7 @@ sub _create_collection_table {
 create table collection (
     collection char(30) default '' not null,
     max_indexed_id int(10) unsigned not null,
+    
     document_table char(30) default '' not null,
     document_id_field char(30) default '' not null,
     document_fields char(250) default '' not null,
@@ -523,8 +537,6 @@ sub _search {
 
     my @result_documents = $self->{RESULT_VECTOR}->Index_List_Read;
 
-    return $ERROR{'no_results'} unless $#result_documents >= 0;
-
     my %score;
 
     if ($self->{OR_WORD_COUNT} == 1 && $self->{AND_WORD_COUNT} == 0
@@ -533,7 +545,10 @@ sub _search {
 	my $word = $self->{QUERY_OR_WORDS}->[$field_no]->[0];
 
 	my $occurence = $self->_occurence($field_no, $word);
-		
+	return $ERROR{'no_results'} unless defined $occurence;
+
+	# idf should use a collection size instead of max_indexed_id
+
 	my $idf;
 	if ($occurence) {
 	    $idf = log($self->{MAX_INDEXED_ID}/$occurence);
@@ -562,6 +577,7 @@ sub _search {
 			      @{$self->{QUERY_AND_WORDS}->[$field_no]} ) {
 
 		my $occurence = $self->_occurence($field_no, $word);
+		next WORD unless defined $occurence;
 		
 		my $idf;
 		if ($occurence) {
@@ -579,11 +595,13 @@ sub _search {
 		foreach my $document_id (@result_documents) {
 		    next DOCUMENT_ID unless defined $word_score{$document_id};
 		    my $maxtf = $self->{MAXTF}->[$field_no]->[$document_id];
+		    my $sqrt_maxtf = sqrt($maxtf);
+		    $sqrt_maxtf = 1 unless $sqrt_maxtf;
 		    if ($score{$document_id}) {
 			$score{$document_id} *=
-			    (1 + (($word_score{$document_id}/sqrt($maxtf)) * $idf));
+			    (1 + (($word_score{$document_id}/$sqrt_maxtf) * $idf));
 		    } else {
-			$score{$document_id} = (1 + (($word_score{$document_id}/sqrt($maxtf)) * $idf));
+			$score{$document_id} = (1 + (($word_score{$document_id}/$sqrt_maxtf) * $idf));
 		    }
 		}
 	    }
@@ -600,26 +618,17 @@ sub _occurence {
     my $self = shift;
     my $field_no = shift;
     my $word = shift;
-
     my ($sql, $sth);
-
+    return undef unless $word;
     $sql = qq(
 	      select occurence from $self->{INVERTED_TABLES}->[$field_no]
 	      where word = ?
 	      );
 
     $sth = $self->{INDEX_DBH}->prepare($sql);
-
     $sth->execute($word);
-
-    my $occurence;
-
-    $sth->bind_col(1, \$occurence);
-
-    $sth->fetch;
-
-    $sth->finish;		 
-
+    my ($occurence) = $sth->fetchrow_array;
+    return undef unless $occurence;
     return $occurence;
 
 }
@@ -1329,11 +1338,33 @@ if (ref $results) {
     print "Error: $results\n";
 }
 
+=head2 $index->unscored_search(\%search_args)
+
+unscored_search() returns $document_ids, a reference to an array.  Since
+the scoring algorithm is skippped, this method is much faster than search()
+
+$document_ids = $index->unscored_search({
+    first_field => '+andword -notword orword "phrase words"',
+    second_field => ...
+});
+
+if (ref $document_ids) {
+    print "Here's all the document ids:\n";
+    map { print "$_\n" } @$document_ids;
+} else {
+    print "Error: $document_ids\n";
+}
+
 =head2 $index->delete
 
 delete() removes the tables associated with a TextIndex from index_dbh.
 
 =head1 CHANGES
+
+0.05 Added unscored_search() which returns a reference to an array of
+document_ids, without scores.  Should be much faster than scored search.
+
+    Added error handling in case _occurence() doesn't return a number.
 
 0.04 Bug fix: add_document() will return if passed empty array ref instead
 of producing error.
@@ -1354,11 +1385,11 @@ added or changed until the first stable release.
 
 =head1 AUTHOR
 
-Daniel Koch, dkoch@amcity.com
+Daniel Koch, dkoch@bizjournal.com
 
 =head1 COPYRIGHT
 
-Copyright 1997, 1998, 1999 by Daniel Koch.
+Copyright 1997, 1998, 1999, 2000, 2001 by Daniel Koch.
 All rights reserved.
 
 =head1 LICENSE
@@ -1401,7 +1432,7 @@ word-proximity information to the index would be much appreciated.
 No facility for deleting documents from an index.  Work-around: create
 a new index. 
 
-Please feel free to email me (dkoch@amcity.com) with any questions
+Please feel free to email me (dkoch@bizjournals.com) with any questions
 or suggestions.
 
 =head1 SEE ALSO

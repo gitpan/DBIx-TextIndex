@@ -1,4 +1,9 @@
 Revision history for Perl extension DBIx::TextIndex.
+0.05 Added unscored_search() which returns a reference to an array of
+     document_ids, without scores.  Should be much faster than scored search.
+
+     Added error handling in case _occurence() doesn't return a number.
+
 0.04 Bug fix: add_document() will return if passed empty array ref
      instead of producing error.
 
