@@ -2,7 +2,7 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.15';
+our $VERSION = '0.17';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -21,7 +21,7 @@ my $QRY = 'DBIx::TextIndex::Exception::Query';
 my $ME  = 'DBIx::TextIndex"';
 
 # Version number when collection table definition last changed
-my $LAST_COLLECTION_TABLE_UPGRADE = '0.12';
+my $LAST_COLLECTION_TABLE_UPGRADE = '0.17';
 
 # Largest size word to be indexed
 my $MAX_WORD_LENGTH = 20;
@@ -30,10 +30,15 @@ my $MAX_WORD_LENGTH = 20;
 my $MIN_WILDCARD_LENGTH = 5;
 
 # Used to screen stop words from the scoring process
-my $IDF_THRESHOLD = 0.2;
+my $IDF_MIN_LEGACY_TFIDF = 0.2;
+my $IDF_MIN_OKAPI        = -1.8;
 
 # What can be considered too many results
 my $RESULT_THRESHOLD = 5000;
+
+# Document score accumulator, higher numbers increase scoring accuracy
+# but use more memory and cpu
+my $ACCUMULATOR_LIMIT = 20000;
 
 # Practical number of rows RDBMS can scan in acceptable amount of time
 my $PHRASE_THRESHOLD = 1000;
@@ -73,6 +78,8 @@ my @COLLECTION_FIELDS = qw(
     phrase_threshold
     min_wildcard_length
     decode_html_entities
+    scoring_method
+    update_commit_interval
 );
 
 my %COLLECTION_FIELD_DEFAULT = (
@@ -94,6 +101,8 @@ my %COLLECTION_FIELD_DEFAULT = (
     phrase_threshold => $PHRASE_THRESHOLD,
     min_wildcard_length => $MIN_WILDCARD_LENGTH,
     decode_html_entities => '1',
+    scoring_method => 'okapi',
+    update_commit_interval => 20000,
 );
 
 
@@ -116,6 +125,8 @@ sub new {
 	    throw $GEN( error => "new $pkg needs $arg argument" );
 	}
     }
+
+    my $coll = $self->{COLLECTION};
 
     # term_docs field can have character 32 at end of string,
     # so DBI ChopBlanks must be turned off
@@ -150,11 +161,18 @@ sub new {
 	    || $MIN_WILDCARD_LENGTH;
 	$self->{DECODE_HTML_ENTITIES} = $args->{decode_html_entities}
 	    || 1;
+	$self->{SCORING_METHOD} = $args->{scoring_method}
+	    || $COLLECTION_FIELD_DEFAULT{scoring_method};
+	$self->{UPDATE_COMMIT_INTERVAL} =
+	    defined $args->{update_commit_interval} ?
+	    $args->{update_commit_interval} :
+	    $COLLECTION_FIELD_DEFAULT{update_commit_interval};
     }
     $self->{CZECH_LANGUAGE} = $self->{CHARSET} eq 'iso-8859-2' ? 1 : 0;
-    $self->{MAXTF_TABLE} = $self->{COLLECTION} . '_maxtf';
-    $self->{MASK_TABLE} = $self->{COLLECTION} . '_mask';
-    $self->{ALL_DOCS_VECTOR_TABLE} = $self->{COLLECTION} . "_all_docs_vector";
+    $self->{MAXTF_TABLE} = $coll . '_maxtf';
+    $self->{MASK_TABLE} = $coll . '_mask';
+    $self->{DOCWEIGHTS_TABLE} = $coll . '_docweights';
+    $self->{ALL_DOCS_VECTOR_TABLE} = $coll . "_all_docs_vector";
 
     # Field number, assign each field a number 0 .. N
     my $fno = 0;
@@ -162,10 +180,10 @@ sub new {
     foreach my $field ( @{$self->{DOC_FIELDS}} ) {
 	$self->{FIELD_NO}->{$field} = $fno;
 	push @{$self->{INVERTED_TABLES}},
-	    ($self->{COLLECTION} . '_' . $field . '_inverted');
+	    ($coll . '_' . $field . '_inverted');
 	if ($self->{PINDEX}) {
 	    push @{$self->{PINDEX_TABLES}},
-		($self->{COLLECTION} . '_' . $field . '_pindex');
+		($coll . '_' . $field . '_pindex');
 	}
     	$fno++;
     }
@@ -246,11 +264,8 @@ sub add_doc {
 
     my @sort_ids = sort { $a <=> $b } @$ids;
 
-    $self->{OLD_MAX_INDEXED_ID} = $self->max_indexed_id;
-    $self->max_indexed_id($sort_ids[-1]);
-
     my @added_ids;
-
+    my $batch_count = 0;
     foreach my $doc_id (@sort_ids) {
 	print $doc_id if $PA;
 	unless ($self->_ping_doc($doc_id)) {
@@ -263,39 +278,56 @@ sub add_doc {
 
 	    my %frequency;
 	    my $maxtf = 0;
-	    my $word_count = 0;
             my $table = $self->{PINDEX_TABLES}->[$fno];
 	    my @words = $self->_words($self->_fetch_doc($doc_id,
 				      $self->{DOC_FIELDS}->[$fno]));
 
+	    # word count
+	    my $wc = 0;
 	    foreach my $word (@words) {
 		$frequency{$word}++;
 		$maxtf = $frequency{$word} if $frequency{$word} > $maxtf;
                 if ($self->{PINDEX}) {
 		    my $sql = $self->db_pindex_add($table);
 		    $self->{INDEX_DBH}->do($sql, undef,
-					   $word, $doc_id, $word_count);
-		    print "pindex: adding $doc_id, word: $word, pos: $word_count\n"
+					   $word, $doc_id, $wc);
+		    print "pindex: adding $doc_id, word: $word, pos: $wc\n"
 			if $PA > 1;
 		}
-		$word_count++;
+		$wc++;
 	    }
-	    print " $word_count" if $PA;
+	    print " $wc" if $PA;
 	    
 	    while (my ($word, $frequency) = each %frequency) {
 		$self->_docs($fno, $word, $doc_id, $frequency);
 	    }
 	    $self->{NEW_MAXTF}->[$fno]->[$doc_id] = $maxtf;
+	    # Doc weight
+	    $self->{NEW_W_D}->[$fno]->[$doc_id] = $wc ?
+		sprintf("%.5f", sqrt((1 + log($wc))**2)) : 0;
 	}	# end of field indexing
 	print "\n" if $PA;
 
 	push @added_ids, $doc_id;
+	$batch_count++;
+	if ($self->{UPDATE_COMMIT_INTERVAL}
+	    && $batch_count >= $self->{UPDATE_COMMIT_INTERVAL}) {
+	    # Update database
+	    $self->{OLD_MAX_INDEXED_ID} = $self->max_indexed_id;
+	    $self->max_indexed_id($added_ids[-1]);
+	    $self->all_doc_ids(@added_ids);
+	    $self->_commit_docs;  
+	    $batch_count = 0;
+	    @added_ids = ();
+	}
 
     }	# end of doc indexing
 
+    # Update database
+    $self->{OLD_MAX_INDEXED_ID} = $self->max_indexed_id;
+    $self->max_indexed_id($sort_ids[-1]);
     $self->all_doc_ids(@added_ids);
-
-    $self->_commit_docs;
+    $self->_commit_docs;  
 
     return $add_count;
 
@@ -346,6 +378,9 @@ sub remove_doc {
 	$self->_pindex_remove($ids);
     }
 
+    print "Removing docs from docweights table\n" if $PA;
+    $self->_docweights_remove($ids);
+
     print "Removing docs from max term frequency table\n" if $PA;
     $self->_maxtf_remove($ids);
 
@@ -386,6 +421,27 @@ sub _maxtf_remove {
 	}
 	my $packed_maxtf = pack 'w' x ($#maxtf + 1), @maxtf;
 	$sth->execute($fno, $packed_maxtf);
+    }
+}
+
+sub _docweights_remove {
+    my $self = shift;
+    my $docs_ref = shift;
+    
+    my @docs = @{$docs_ref};
+    my $use_all_fields = 1;
+    $self->_fetch_docweights($use_all_fields);
+    
+    my $sql = $self->db_update_docweights;
+    my $sth = $self->{INDEX_DBH}->prepare($sql);
+    foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
+	my @w_d = @{$self->{W_D}->[$fno]};
+	foreach my $doc_id (@docs) {
+	    $w_d[$doc_id] = 0;
+	}
+	my $packed_w_d = join(',', @w_d);
+	# FIXME: we should update the average, leave it alone for now
+	$sth->execute($fno, $self->{AVG_W_D}->[$fno], $packed_w_d);
     }
 }
 
@@ -475,6 +531,20 @@ sub search {
     my $query = shift;
     my $args = shift;
 
+    # check to see if documents have been added since we last called new()
+    my $new_max_indexed_id = $self->fetch_max_indexed_id;
+    if ($new_max_indexed_id != $self->{MAX_INDEXED_ID}) {
+	# flush things that stick around
+	$self->max_indexed_id($new_max_indexed_id);
+	$self->{C}->max_indexed_id($new_max_indexed_id);
+	delete($self->{VECTOR});
+	delete($self->{ALL_DOCS_VECTOR});
+	delete($self->{W_D});
+	delete($self->{AVG_W_D});
+	delete($self->{MASK});
+	delete($self->{MASK_VECTOR});
+    }
+
     $self->{OR_WORD_COUNT} = 0;
     $self->{AND_WORD_COUNT} = 0;
 
@@ -534,7 +604,18 @@ sub search {
 	return \@result_docs;
     }
 
-    my $results = $self->_search;
+    my $scoring_method = $args->{scoring_method} || $self->{SCORING_METHOD};
+    my $results;
+    if ($scoring_method eq 'okapi') {
+	$results = $self->_search_okapi;
+    } elsif ($scoring_method eq 'legacy_tfidf') {
+	$results = $self->_search_legacy_tfidf;
+    } else {
+	throw $GEN( error => "Invalid scoring method $scoring_method, select okapi or legacy_tfidf");
+    }
+
+    $self->{C}->flush;
+
     return $results;
 }
 
@@ -588,6 +669,12 @@ sub max_indexed_id {
     }
 }
 
+sub fetch_max_indexed_id {
+    my $self = shift;
+    my ($max_indexed_id) = $self->{INDEX_DBH}->selectrow_array($self->db_fetch_max_indexed_id, undef, $self->{COLLECTION});
+    return $max_indexed_id;
+}
+
 sub delete {
 
     my $self = shift;
@@ -598,6 +685,9 @@ sub delete {
     print "Dropping mask table ($self->{MASK_TABLE})\n" if $PA;
     $self->db_drop_table($self->{MASK_TABLE});
     
+    print "Dropping docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
+    $self->db_drop_table($self->{DOCWEIGHTS_TABLE});
+
     print "Dropping max term frequency table ($self->{MAXTF_TABLE})\n" if $PA;
     $self->db_drop_table($self->{MAXTF_TABLE});
 
@@ -776,6 +866,8 @@ sub _store_collection_info {
 			   $self->{MIN_WILDCARD_LENGTH},
 
 			   $self->{DECODE_HTML_ENTITIES},
+			   $self->{SCORING_METHOD},
+			   $self->{UPDATE_COMMIT_INTERVAL},
 			   ) || croak $DBI::errstr;
 
 }
@@ -830,6 +922,8 @@ sub _fetch_collection_info {
 		       \$self->{MIN_WILDCARD_LENGTH},
 
 		       \$self->{DECODE_HTML_ENTITIES},
+		       \$self->{SCORING_METHOD},
+		       \$self->{UPDATE_COMMIT_INTERVAL},
 		       );
 
     $sth->fetch;
@@ -1034,6 +1128,7 @@ sub _proximity_match {
     return $match;
 }
 
+
 sub _fetch_vectors {
     my $self = shift;
     my $maxid = $self->max_indexed_id + 1;
@@ -1052,9 +1147,7 @@ sub _fetch_vectors {
 }
 
 sub _fetch_maxtf {
-
     my $self = shift;
-
     my $use_all_fields = shift;
 
     my $fnos;
@@ -1075,10 +1168,107 @@ sub _fetch_maxtf {
     }
 
     $sth->finish;
-
 }
 
-sub _search {
+sub _fetch_docweights {
+    my $self = shift;
+    my $all_fields = shift;
+
+    my @fnos;
+    if ($all_fields) {
+	@fnos = (0 .. $#{$self->{DOC_FIELDS}});
+    } else {
+	# skip over if we already have hash entry
+	foreach my $fno (@{$self->{QUERY_FIELD_NOS}}) {
+	    unless (ref $self->{W_D}->[$fno]) {
+		push @fnos, $fno;
+	    } 
+	}
+    }
+
+    if ($#fnos > -1) {
+	my $fnos = join(',', @fnos);
+
+	my $sql = $self->db_fetch_docweights($fnos);
+
+	my $sth = $self->{INDEX_DBH}->prepare($sql);
+
+	$sth->execute || warn $DBI::errstr;
+
+	while (my $row = $sth->fetchrow_arrayref) {
+	    $self->{AVG_W_D}->[$row->[0]] = $row->[1];
+	    $self->{W_D}->[$row->[0]] = [split(/,/,$row->[2])];
+	}
+
+	$sth->finish;
+    }
+}
+
+sub _search_okapi {
+
+    my $self = shift;
+
+    my %score;                # accumulator to hold doc scores
+
+    my $b = 0.75;             # $b, $k1, $k3 are parameters for Okapi
+    my $k1 = 1.2;             # BM25 algorithm
+    my $k3 = 7;               #
+    my $f_qt;                 # frequency of term in query
+    my $f_t;                  # Number of documents that contain term
+    my $W_d;                  # weight of document, sqrt((1 + log(words))**2)
+    my $aW_d;                 # average document weight in collection
+    my $doc_id;               # document id
+    my $f_dt;                 # frequency of term in given doc_id
+    my $idf = 0;
+    my $fno = 0;
+
+    my $acc_size = 0;         # current number of keys in %score
+
+    # FIXME: use actual document count
+    my $N = $self->{MAX_INDEXED_ID};
+
+    $self->_fetch_docweights;
+
+    my $result_max = $self->{RESULT_VECTOR}->Max;
+    my $result_min = $self->{RESULT_VECTOR}->Min;
+
+    $aW_d = $self->{AVG_W_D}->[$fno];
+    foreach my $term (@{$self->{TERMS}->[$fno]}) {
+	$f_t = $self->{C}->f_t($fno, $term);
+	$idf =  log(($N - $f_t + 0.5) / ($f_t + 0.5));
+	next if $idf < $IDF_MIN_OKAPI;
+	$f_qt = $self->{F_QT}->[$fno]->{$term};      # freq of term in query
+	my $w_qt = (($k3 + 1) * $f_qt) / ($k3 + $f_qt); # query term weight
+	my $term_docs = $self->{C}->term_docs_arrayref($fno, $term);
+	for (my $i = 0; ($i < (2 * $f_t))
+	       && ($acc_size < $ACCUMULATOR_LIMIT) ; $i += 2) {
+	    $doc_id = $term_docs->[$i];
+	    last if $doc_id > $result_max;
+	    next if $doc_id < $result_min;
+	    next unless $self->{RESULT_VECTOR}->bit_test($doc_id);
+	    $f_dt = $term_docs->[$i + 1];
+	    $W_d = $self->{W_D}->[$fno]->[$i];
+
+	    my $TF = ( (($k1 + 1) * $f_dt) /
+		       ($k1 * ((1 - $b) + (($b * $W_d)/$aW_d)) + $f_dt ) );
+
+	    $score{$doc_id} += $idf * $TF * $w_qt;
+
+	    $acc_size = scalar keys %score;
+
+	}
+    }
+    unless (scalar keys %score) {
+	if (not @{$self->{STOPLISTED_QUERY}}) {
+	    throw $QRY( error => $ERROR{no_results} );
+	} else {
+	    throw $QRY( error => $self->_format_stoplisted_error );
+	}
+    }
+    return \%score;
+}
+
+sub _search_legacy_tfidf {
 
     my $self = shift;
 
@@ -1096,18 +1286,19 @@ sub _search {
 	my $fno = $self->{QUERY_FIELD_NOS}->[0];
 	my $word = $self->{QUERY_OR_WORDS}->[$fno]->[0] || $self->{QUERY_AND_WORDS}->[$fno]->[0];
 
-	my $docfreq_t = $self->_docfreq_t($fno, $word);
+	my $f_t = $self->{C}->f_t($fno, $word);
 
 	# idf should use a collection size instead of max_indexed_id
 
 	my $idf;
-	if ($docfreq_t) {
-	    $idf = log($self->{MAX_INDEXED_ID}/$docfreq_t);
+	if ($f_t) {
+	    $idf = log($self->{MAX_INDEXED_ID}/$f_t);
 	} else {
 	    $idf = 0;
 	}
 
-	throw $QRY( error => $ERROR{'no_results'} ) if $idf < $IDF_THRESHOLD;
+	throw $QRY( error => $ERROR{'no_results'} )
+	    if $idf < $IDF_MIN_LEGACY_TFIDF;
 
 	my $raw_score = $self->_docs($fno, $word);
 
@@ -1129,18 +1320,18 @@ sub _search {
 	foreach my $word (@{$self->{QUERY_OR_WORDS}->[$fno]},
 			  @{$self->{QUERY_AND_WORDS}->[$fno]} ) {
 	    
-	    my $docfreq_t = $self->_docfreq_t($fno, $word);
-	    # next WORD unless defined $docfreq_t;
-	    $docfreq_t = 1 unless defined $docfreq_t;
+	    my $f_t = $self->{C}->f_t($fno, $word);
+	    # next WORD unless defined $f_t;
+	    $f_t = 1 unless defined $f_t;
 
 	    my $idf;
-	    if ($docfreq_t) {
-		$idf = log($self->{MAX_INDEXED_ID}/$docfreq_t);
+	    if ($f_t) {
+		$idf = log($self->{MAX_INDEXED_ID}/$f_t);
 	    } else {
 		$idf = 0;
 	    }
 
-	    next WORD if $idf < $IDF_THRESHOLD;
+	    next WORD if $idf < $IDF_MIN_LEGACY_TFIDF;
 
 	    my $word_score = $self->_docs($fno, $word);
 
@@ -1178,22 +1369,6 @@ sub _format_stoplisted_error {
     my $self = shift;
     my $stopped = join(', ', @{$self->{STOPLISTED_QUERY}});
     return qq($ERROR{no_results_stop} $stopped.);
-}
-
-sub _docfreq_t {
-    my $self = shift;
-    my $fno = shift;
-    my $word = shift;
-    return undef unless $word;
-    if ($self->{DOCFREQ_T}->[$fno]->{$word}) {
-	return $self->{DOCFREQ_T}->[$fno]->{$word};
-    }
-    my $sql = $self->db_docfreq_t($self->{INVERTED_TABLES}->[$fno]);
-    my $sth = $self->{INDEX_DBH}->prepare($sql);
-    $sth->execute($word);
-    my ($docfreq_t) = $sth->fetchrow_array;
-    return undef unless $docfreq_t;
-    return $docfreq_t;
 }
 
 ######################################################################
@@ -1597,6 +1772,15 @@ sub _parse_query {
 
     $self->{HIGHLIGHT} = join '|', @all_words;
 
+    my %f_t;
+    foreach my $term (@or_words, @and_words) {
+	$f_t{$term} = $self->{C}->f_t($fno, $term);
+	# query term frequency
+	$self->{F_QT}->[$fno]->{$term}++;
+    }
+    # Set TERMS to frequency-sorted list
+    my @freq_sort = sort {$f_t{$a} <=> $f_t{$b}} keys %f_t;
+    $self->{TERMS}->[$fno] = \@freq_sort;
 }
 
 # Set everything to lowercase and change accented characters to
@@ -1613,50 +1797,35 @@ sub _docs {
 
     my $self = shift;
     my $fno = shift;
-    my $word = shift;
+    my $term = shift;
 
     local $^W = 0; # turn off uninitialized value warning
     if (@_) {
-	$self->{TERM_DOCS_VINT}->[$fno]->{$word} .= pack 'w*', @_;
-	$self->{DOCFREQ_T}->[$fno]->{$word}++; 
+	$self->{TERM_DOCS_VINT}->[$fno]->{$term} .= pack 'w*', @_;
+	$self->{DOCFREQ_T}->[$fno]->{$term}++; 
     } else {
-	term_docs_hashref($self->_fetch_docs($fno, $word));
+	$self->{C}->term_docs_hashref($fno, $term);
     }
-
-}
-
-sub _fetch_docs {
-    my $self = shift;
-    my $fno = shift;
-    my $word = shift;
-
-    my $sql = $self->db_fetch_docs($self->{INVERTED_TABLES}->[$fno]);
-    my $sth = $self->{INDEX_DBH}->prepare($sql);
-    $sth->execute($word);
-
-    my $docs;
-    $sth->bind_col(1, \$docs);
-    $sth->fetch;
-    $sth->finish;
-    return $docs;
 }
 
 sub _commit_docs {
     my $self = shift;
 
+    my ($sql, $sth);
+    my $id_a = $self->{OLD_MAX_INDEXED_ID} + 1;
+    my $id_b = $self->{MAX_INDEXED_ID};
     print "Storing max term frequency for each doc\n" if $PA;
 
-    my $use_all_fields = 1;
-    $self->_fetch_maxtf($use_all_fields);
+    $self->_fetch_maxtf(1);
 
-    my $sql = $self->db_update_maxtf;
-	my $sth = $self->{INDEX_DBH}->prepare($sql);
+    $sth = $self->{INDEX_DBH}->prepare($self->db_update_maxtf);
 
     foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	my @maxtf;
 	if ($#{$self->{MAXTF}->[$fno]} >= 0) {
 	    @maxtf = @{$self->{MAXTF}->[$fno]};
-	    @maxtf[($self->{OLD_MAX_INDEXED_ID} + 1) .. $self->{MAX_INDEXED_ID}] = @{$self->{NEW_MAXTF}->[$fno]}[($self->{OLD_MAX_INDEXED_ID} + 1) .. $self->{MAX_INDEXED_ID}];
+	    @maxtf[$id_a .. $id_b] =
+		@{$self->{NEW_MAXTF}->[$fno]}[$id_a .. $id_b];
 	} else {
 	    @maxtf = @{$self->{NEW_MAXTF}->[$fno]};
 	}
@@ -1664,8 +1833,39 @@ sub _commit_docs {
 	my $packed_maxtf = pack 'w' x ($#maxtf + 1), @maxtf;
 	$sth->execute($fno, $packed_maxtf);
     }
+    # Delete temporary in-memory structure
+    delete($self->{NEW_MAXTF});
 
     $sth->finish;
+
+    print "Storing doc weights\n" if $PA;
+
+    $self->_fetch_docweights(1);
+    
+    $sth = $self->{INDEX_DBH}->prepare($self->db_update_docweights);
+
+    foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
+	my @w_d;
+	if ($#{$self->{W_D}->[$fno]} >= 0) {
+	    @w_d = @{$self->{W_D}->[$fno]};
+	    @w_d[$id_a .. $id_b] =
+		@{$self->{NEW_W_D}->[$fno]}[$id_a .. $id_b];
+	} else {
+	    @w_d = @{$self->{NEW_W_D}->[$fno]};
+	}
+	my $sum;
+	foreach (@w_d) {
+	    $sum += $_;
+	}
+	# FIXME: use actual doc count instead of max_indexed_id
+	my $avg_w_d = $sum / $id_b; 
+	$w_d[0] = 0 unless defined $w_d[0];
+	# FIXME: this takes too much space
+	my $packed_w_d = join(',', @w_d);
+	$sth->execute($fno, $avg_w_d, $packed_w_d);
+    }
+    # Delete temporary in-memory structure
+    delete($self->{NEW_W_D});
 
     print "Committing inverted tables to database\n" if $PA;
 
@@ -1674,17 +1874,15 @@ sub _commit_docs {
 	print("field$fno ", scalar keys %{$self->{TERM_DOCS_VINT}->[$fno]}, " distinct words\n") if $PA;
 
 	my $i_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_replace($self->{INVERTED_TABLES}->[$fno]) );
+	my $s_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_select($self->{INVERTED_TABLES}->[$fno]) );
 
 	my $wc = 0;
 	while (my ($word, $term_docs_vint) = each %{$self->{TERM_DOCS_VINT}->[$fno]}) {
-
 	    print "$word\n" if $PA >= 2;
 	    if ($PA && $wc > 0) {
 		print "committed $wc words\n" if $wc % 500 == 0;
 	    }
 
-	    my $s_sth = $self->{INDEX_DBH}->prepare( $self->db_inverted_select($self->{INVERTED_TABLES}->[$fno]) );
-	    
 	    my $o_docfreq_t = 0;
 	    my $o_term_docs = '';
 
@@ -1694,18 +1892,13 @@ sub _commit_docs {
 
 	    $s_sth->fetch;
 
-	    my @term_docs = unpack 'w*', $term_docs_vint;
+	    my $term_docs = pack_term_docs_append_vint($o_term_docs, $term_docs_vint);
 
-	    # unpack $o_term_docs into arrayref
-	    my $old_term_docs = term_docs_arrayref($o_term_docs);
-	    my $packed_term_docs;
-	    $packed_term_docs = pack_term_docs( [ @$old_term_docs, @term_docs ] );
-
-	    local $^W = 0;
-	    $i_sth->execute($word,
-			    ($self->{DOCFREQ_T}->[$fno]->{$word} + $o_docfreq_t),
-			    $packed_term_docs
-			    ) or warn $self->{INDEX_DBH}->err;
+	    $i_sth->execute(
+	        $word,
+		$self->{DOCFREQ_T}->[$fno]->{$word} + $o_docfreq_t,
+		$term_docs,
+	    ) or warn $self->{INDEX_DBH}->err;
 
 	    delete($self->{TERM_DOCS_VINT}->[$fno]->{$word});
 	    $wc++;
@@ -1829,6 +2022,15 @@ sub _create_tables {
 
     $sql = $self->db_create_mask_table;
     print "Creating mask table ($self->{MASK_TABLE})\n" if $PA;
+    $self->{INDEX_DBH}->do($sql);
+
+    # docweights table
+
+    print "Dropping docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
+    $self->db_drop_table($self->{DOCWEIGHTS_TABLE});
+
+    $sql = $self->db_create_docweights_table;
+    print "Creating docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
     $self->{INDEX_DBH}->do($sql);
 
     # max term frequency table

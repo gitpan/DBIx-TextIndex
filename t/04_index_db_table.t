@@ -26,6 +26,7 @@ my $index = DBIx::TextIndex->new({
     doc_id_field => 'doc_id',
     index_dbh => $dbh,
     collection => 'encantadas',
+    update_commit_interval => 15,
 });
 
 ok( ref $index eq 'DBIx::TextIndex' );

@@ -66,6 +66,8 @@ CREATE TABLE collection (
   phrase_threshold int(10) unsigned NOT NULL default '0',
   min_wildcard_length int(10) unsigned NOT NULL default '0',
   decode_html_entities enum('0', '1') NOT NULL default '0',
+  scoring_method varchar(20) NOT NULL default '',
+  update_commit_interval int(10) unsigned NOT NULL default '0',
   PRIMARY KEY collection_key (collection)
 )
 END
@@ -89,6 +91,17 @@ insert into $self->{COLLECTION_TABLE}
 values ($place_holders)
 END
     $self->{INDEX_DBH}->do($sql, undef, @values);
+
+}
+
+sub db_fetch_max_indexed_id {
+    my $self = shift;
+
+    return <<END;
+SELECT max_indexed_id
+FROM $self->{COLLECTION_TABLE}
+WHERE collection = ?
+END
 
 }
 
@@ -209,6 +222,19 @@ END
 
 }
 
+sub db_fetch_docweights {
+    my $self = shift;
+    my $fields = shift;
+
+    return <<END;
+select field_no, avg_docweight, docweights
+from $self->{DOCWEIGHTS_TABLE}
+where field_no in ($fields)
+END
+
+}
+
+
 sub db_fetch_all_docs_vector {
     my $self = shift;
     return <<END;
@@ -249,7 +275,7 @@ END
 
 }
 
-sub db_fetch_docs {
+sub db_fetch_term_docs {
     my $self = shift;
     my $table = shift;
 
@@ -317,6 +343,16 @@ END
 
 }
 
+sub db_update_docweights {
+    my $self = shift;
+
+    return <<END;
+replace into $self->{DOCWEIGHTS_TABLE} (field_no, avg_docweight, docweights)
+values (?, ?, ?)
+END
+
+}
+
 sub db_inverted_replace {
     my $self = shift;
     my $table = shift;
@@ -363,6 +399,18 @@ create table $self->{MASK_TABLE} (
 )
 END
 
+}
+
+sub db_create_docweights_table {
+    my $self = shift;
+    return <<END;
+create table $self->{DOCWEIGHTS_TABLE} (
+  field_no 	   smallint unsigned 	   not null,
+  avg_docweight    float                   not null,
+  docweights 	   mediumblob 		   not null,
+  primary key 	   field_no_key (field_no)
+)
+END
 }
 
 sub db_create_maxterm_table {

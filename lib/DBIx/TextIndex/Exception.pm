@@ -2,6 +2,8 @@ package DBIx::TextIndex::Exception;
 
 use strict;
 
+our $VERSION = '0.16';
+
 use Exception::Class (
   'DBIx::TextIndex::Exception',
 

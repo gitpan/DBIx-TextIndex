@@ -47,7 +47,8 @@ my @result_docs;
 foreach my $term (@terms) {
     my $top_doc;
     eval {
-	$results = $index->search({ doc => $term });
+	$results = $index->search({ doc => $term },
+                                  { scoring_method => 'legacy_tfidf' });
     };
     if ($@) {
 	if (ref $@ && $@->isa('DBIx::TextIndex::Exception::Query') ) {

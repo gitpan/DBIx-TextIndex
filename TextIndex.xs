@@ -12,6 +12,7 @@ MODULE = DBIx::TextIndex		PACKAGE = DBIx::TextIndex
 void
 term_docs_hashref(packed)
 SV *packed
+PROTOTYPE: $
 PPCODE:
 {
     HV *freqs;
@@ -60,6 +61,7 @@ PPCODE:
 void
 term_docs_arrayref(packed)
 SV *packed
+PROTOTYPE: $
 PPCODE:
 {
     AV *results;
@@ -109,6 +111,7 @@ PPCODE:
 void
 term_doc_ids_arrayref(packed)
 SV *packed
+PROTOTYPE: $
 PPCODE:
 {
     AV *results;
@@ -157,6 +160,7 @@ PPCODE:
 void
 term_docs_array(packed)
 SV *packed
+PROTOTYPE: $
 PPCODE:
 {
     char *string;
@@ -257,6 +261,7 @@ PPCODE:
 void
 pack_vint(ints_arrayref)
 SV *ints_arrayref
+PROTOTYPE: $
 PPCODE:
 {
     char *packed;
@@ -300,6 +305,7 @@ PPCODE:
 void
 pack_term_docs(term_docs_arrayref)
 SV *term_docs_arrayref
+PROTOTYPE: $
 PPCODE:
 {
     char *packed;
@@ -361,4 +367,138 @@ PPCODE:
     }
     XPUSHs(sv_2mortal(newSVpv((char *)packed, j)));
     Safefree(packed);
+}
+
+void
+pack_term_docs_append_vint(packed, vint)
+SV *packed
+SV *vint
+PROTOTYPE: $$
+PPCODE:
+{
+    char *str_a, *str_b, *newpack;
+    STRLEN len_a, len_b;
+    I32 length_a = 0;
+    I32 length_b = 0;
+    int length = 0;
+    int freq_is_next = 0;
+    unsigned int value, val, i, j, freq;
+    unsigned int doc = 0;
+    unsigned int max_doc = 0;
+    unsigned int last_doc = 0;
+    register unsigned long buff;
+    char temp;
+
+    str_a = SvPV(packed, len_a);
+    length_a = len_a;
+
+    str_b = SvPV(vint, len_b);
+    length_b = len_b;
+
+    if (length_b < 1) {
+        XPUSHs(sv_2mortal(newSVpv((char *)str_a, length_a)));
+        return;
+    }	
+
+    New(2, newpack, ( length_a + (4 * (length_b + 1)) ), char);
+    if (newpack == NULL)
+        TEXTINDEX_ERROR("unable to allocate memory");
+
+    Copy(str_a, newpack, length_a, char);
+
+    /* Step 1: get max_doc (highest doc id) from 1st arg (packed) */
+
+    length = length_a;
+    /* last byte cannot have high bit set */
+    if (*(str_a + length) & 0x80)
+        TEXTINDEX_ERROR("unterminated compressed integer");
+    while (length > 0) {
+	value = *str_a++; length--;
+	if (value & 0x80)
+	{
+	    value &= 0x7f;
+	    do
+	    {
+		temp = *str_a++; length--;
+		value = (value << 7) + (temp & 0x7f);
+	    } while (temp & 0x80);
+	}
+	if ( freq_is_next ) {
+            freq_is_next = 0;
+	    continue;
+        } 
+
+	doc += value >> 1;
+            max_doc = doc;
+
+	if (! (value & 1)) {
+	    freq_is_next = 1;
+	}
+    }
+
+    /* Step 2: unpack 2nd arg (vint) and repack as deltas */
+
+
+    last_doc = max_doc;
+
+    i = 0;
+    j = length_a;
+    length = length_b;
+    while (length > 0) {
+	value = *str_b++; length--;
+	if (value & 0x80)
+	{
+	    value &= 0x7f;
+	    do
+	    {
+		temp = *str_b++; length--;
+	        if (length < 0)
+	            TEXTINDEX_ERROR("unterminated compressed integer"); 
+		value = (value << 7) + (temp & 0x7f);
+	    } while (temp & 0x80);
+	}
+ 	if (i % 2 == 0) {
+            doc = value;
+        } else {
+            freq = value;
+
+	    val = (doc - last_doc) << 1;
+            if (freq == 1)
+                val += 1;
+
+            buff = val & 0x7f;
+            while ((val >>= 7)) {
+	        buff <<= 8;
+                buff |= ((val & 0x7f) | 0x80);
+            }
+
+            while (1) {
+                *(newpack + j) = buff;
+                j++;
+                if (buff & 0x80)
+                    buff >>= 8;
+                else
+                    break;
+            }
+            if (freq > 1) {
+                buff = freq & 0x7f;
+                while ((freq >>= 7)) {
+	            buff <<= 8;
+                    buff |= ((freq & 0x7f) | 0x80);
+                }
+                while (1) {
+                    *(newpack + j) = buff;
+                    j++;
+                    if (buff & 0x80)
+                        buff >>= 8;
+                    else
+                        break;
+                }
+            }
+            last_doc = doc;
+        }
+        i++;
+    }
+    XPUSHs(sv_2mortal(newSVpv((char *)newpack, j)));
+    Safefree(newpack);
 }

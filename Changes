@@ -2,6 +2,31 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.17
+    Reduced memory usage by TermDocsCache
+
+    Implemented Okapi BM25 weighting function [S.E. Robertson et al., Google
+    for description] for scoring documents.  Pass scoring_method =>
+    'legacy_tfidf' to new() or search() to use older method.  Thanks to
+    the lucy project (http://www.seg.rmit.edu.au/lucy/) for inspiration.
+
+    Added docweights table to support Okapi BM25 scoring.  Indexes need to
+    be dropped and recreated.
+
+    Pass "update_commit_interval" to new() to control memory usage in
+    index updates.  As the index is built, postings lists are
+    built up in memory; this parameter controls the number of documents
+    held in memory before being flushed to the database.  Default is 20000.
+    To disable, pass 0, and all documents passed to add_doc() will
+    indexed in memory before writing to the database.
+
+    Fixed problem with inaccurate search results if multiple searches were
+    performed on a single instance while another instance was updating index.
+
+0.16
+    Added XSUB pack_term_docs_append_vint to speed up _commit_docs when
+    adding new postings to existing compressed postings
+
 0.15
     WARNING: indexes will have to be recreated after upgrading to this version
 
@@ -21,7 +46,8 @@ Revision history for Perl extension DBIx::TextIndex.
 0.13
     Changed format for inverted list postings to compressed binary
     format.  Index sizes should be 50% smaller than with previous versions.
-    Implemented XS code for fast coding and decoding.
+    Implemented XS code for fast coding and decoding.  This format is similar
+    to the format in Lucene (http://jakarta.apache.org/lucene/).
 
     Renamed 'freq_d' to 'docfreq_t'.
 
@@ -312,4 +338,3 @@ final result set.
 
     Initial public release.  Should be considered beta, and methods may be
 added or changed until the first stable release.
-
