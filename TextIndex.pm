@@ -5,7 +5,7 @@ use strict;
 use Bit::Vector;
 use Carp qw(carp croak);
 
-$DBIx::TextIndex::VERSION = '0.01';
+$DBIx::TextIndex::VERSION = '0.02';
 
 # Largest size word to be indexed
 my $MAX_WORD = 30;
@@ -191,6 +191,19 @@ sub search {
 	if ($args->{$mask_type}) {
 	    $self->{MASK}->{$mask_type} = $args->{$mask_type};
 	    foreach my $mask (@{$args->{$mask_type}}) {
+		if (ref $mask) {
+		    $self->{VALID_MASK} = 1;
+		} else {
+		    push @{$self->{MASK_FETCH_LIST}}, $mask;
+		}
+	    }
+	}
+    }
+
+    if ($args->{or_mask_set}) {
+	$self->{MASK}->{or_mask_set} = $args->{or_mask_set};
+	foreach my $mask_set (@{$args->{or_mask_set}}) {
+	    foreach my $mask (@$mask_set) {
 		if (ref $mask) {
 		    $self->{VALID_MASK} = 1;
 		} else {
@@ -665,44 +678,49 @@ sub _apply_mask {
 
     my $self = shift;
 
-    if ($self->{MASK}) {
-	if ($self->_fetch_mask) {
-	    $self->{VALID_MASK} = 1;
-	}
-	if ($self->{MASK}->{and_mask}) {
-	    foreach my $mask (@{$self->{MASK}->{and_mask}}) {
-		unless (ref $mask) {
-		    next unless ref $self->{MASK_VECTOR}->{$mask};
-		    $self->{RESULT_VECTOR}->Intersection(
-		        $self->{RESULT_VECTOR}, $self->{MASK_VECTOR}->{$mask});
-		} else {
-		    my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
-		    $vector->Index_List_Store(@$mask);
-		    $self->{RESULT_VECTOR}->Intersection(
-		        $self->{RESULT_VECTOR}, $vector);
-		}
+    return unless $self->{MASK};
+
+    if ($self->_fetch_mask) {
+	$self->{VALID_MASK} = 1;
+    }
+    if ($self->{MASK}->{and_mask}) {
+	foreach my $mask (@{$self->{MASK}->{and_mask}}) {
+	    unless (ref $mask) {
+		next unless ref $self->{MASK_VECTOR}->{$mask};
+		$self->{RESULT_VECTOR}->Intersection(
+		    $self->{RESULT_VECTOR}, $self->{MASK_VECTOR}->{$mask});
+	    } else {
+		my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
+		$vector->Index_List_Store(@$mask);
+		$self->{RESULT_VECTOR}->Intersection(
+		    $self->{RESULT_VECTOR}, $vector);
 	    }
 	}
-	if ($self->{MASK}->{not_mask}) {
-	    foreach my $mask (@{$self->{MASK}->{not_mask}}) {
-		unless (ref $mask) {
-		    next unless ref $self->{MASK_VECTOR}->{$mask};
-		    $self->{MASK_VECTOR}->{$mask}->Flip;
-		    $self->{RESULT_VECTOR}->Intersection(
-		        $self->{RESULT_VECTOR}, $self->{MASK_VECTOR}->{$mask});
-		} else {
-		    my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
-		    $vector->Index_List_Store(@$mask);
-		    $vector->Flip;
-		    $self->{RESULT_VECTOR}->Intersection(
-		        $self->{RESULT_VECTOR}, $vector);
-		}
+    }
+    if ($self->{MASK}->{not_mask}) {
+	foreach my $mask (@{$self->{MASK}->{not_mask}}) {
+	    unless (ref $mask) {
+		next unless ref $self->{MASK_VECTOR}->{$mask};
+		$self->{MASK_VECTOR}->{$mask}->Flip;
+		$self->{RESULT_VECTOR}->Intersection(
+		    $self->{RESULT_VECTOR}, $self->{MASK_VECTOR}->{$mask});
+	    } else {
+		my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
+		$vector->Index_List_Store(@$mask);
+		$vector->Flip;
+		$self->{RESULT_VECTOR}->Intersection(
+		    $self->{RESULT_VECTOR}, $vector);
 	    }
 	}
-	if ($self->{MASK}->{or_mask}) {
+    }
+    if ($self->{MASK}->{or_mask}) {
+	push @{$self->{MASK}->{or_mask_set}}, $self->{MASK}->{or_mask};
+    }
+    if ($self->{MASK}->{or_mask_set}) {
+	foreach my $mask_set (@{$self->{MASK}->{or_mask_set}}) {
 	    my $or_mask_count = 0;
 	    my $union_vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
-	    foreach my $mask (@{$self->{MASK}->{or_mask}}) {
+	    foreach my $mask (@$mask_set) {
 		unless (ref $mask) {
 		    next unless ref $self->{MASK_VECTOR}->{$mask};
 		    $or_mask_count++;
@@ -719,7 +737,7 @@ sub _apply_mask {
 	    if ($or_mask_count) {
 		$self->{RESULT_VECTOR}->Intersection(
 		    $self->{RESULT_VECTOR}, $union_vector);
-	    }
+	    }  
 	}
     }
 }
@@ -1309,6 +1327,8 @@ if (ref $results) {
 delete() removes the tables associated with a TextIndex from index_dbh.
 
 =head1 CHANGES
+
+0.02 Added or_mask_set.
 
 0.01 Initial public release.  Should be considered beta, and methods may be
 added or changed until the first stable release.

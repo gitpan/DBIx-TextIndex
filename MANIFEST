@@ -1,5 +1,6 @@
 Changes
 MANIFEST
 Makefile.PL
+README
 TextIndex.pm
 test.pl

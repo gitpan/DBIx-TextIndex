@@ -1,0 +1,164 @@
+NAME
+    DBIx::TextIndex - Perl extension for full-text searching in SQL
+    databases
+
+SYNOPSIS
+    use DBIx::TextIndex;
+
+    my $index = DBIx::TextIndex->new({ document_dbh => $document_dbh,
+    document_table => 'document_table', document_fields => ['column_1',
+    'column_2'], document_id_field => 'primary_key', index_dbh =>
+    $index_dbh, collection => 'collection_1', });
+
+    $index->initialize;
+
+    $index->add_document(\@document_ids);
+
+    my $results = $index->search({ column_1 => '"a phrase" +and -not or',
+    column_2 => 'more words', });
+
+    foreach my $document_id (sort {$$results{$b} <=> $$results{$a}} keys
+    %$results ) { print "DocumentID: $document_id Score:
+    $$results{$document_id} \n"; }
+
+    $index->delete;
+
+DESCRIPTION
+    DBIx::TextIndex was developed for doing full-text searches on BLOB
+    columns stored in a MySQL database. Almost any database with BLOB and
+    DBI support should work with minor adjustments to SQL statements in the
+    module.
+
+    Implements a crude parser for tokenizing a user input string into
+    phrases, can-include words, must-include words, and must-not-include
+    words.
+
+    The following methods are available:
+
+  $index = DBIx::TextIndex->new(\%args)
+
+    Constructor method. The first time an index is created, the following
+    arguments must be passed to new():
+
+    my $index = DBIx::TextIndex->new({ document_dbh => $document_dbh,
+    document_table => 'document_table', document_fields => ['column_1',
+    'column_2'], document_id_field => 'primary_key', index_dbh =>
+    $index_dbh, collection => 'collection_1', });
+
+    document_dbh
+        DBI connection handle to database containing text documents
+
+    document_table
+        Name of database table containing text documents
+
+    document_fields
+        Reference to a list of column names to be indexed from
+        document_table
+
+    document_id_field
+        Name of a unique integer key column in document_table
+
+    index_dbh
+        DBI connection handle to database containing TextIndex tables. I
+        recommend using a separate database for your TextIndex, because the
+        module creates and drops tables without warning.
+
+    collection
+        A name for the index. Should contain only alpha-numeric characters
+        or underscores [A-Za-z0-9_]
+
+    After creating a new TextIndex for the first time, and after calling
+    initialize(), only the index_dbh, document_dbh, and collection arguments
+    are needed to create subsequent instances of a TextIndex.
+
+  $index->initialize
+
+    This method creates all the inverted tables for the TextIndex in the
+    database specified by document_dbh. This method should be called only
+    once when creating a new index! It drops all the inverted tables before
+    creating new ones.
+
+    initialize() also stores the document_table, document_fields, and
+    document_id_field attributes in a special table called "collection," so
+    subsequent calls to new() for a given collection do not need those
+    arguments.
+
+  $index->add_document(\@document_ids)
+
+    Add all the @documents_ids from document_id_field to the TextIndex.
+    @document_ids must be sorted from lowest to highest. All further calls
+    to add_document() must use @document_ids higher than those previously
+    added to the index. Reindexing previously-indexed documents will yield
+    unpredictable results!
+
+  $index->search(\%search_args)
+
+    search() returns $results, a reference to a hash. The values of the hash
+    are document ids, keyed by the relative score of the document. If an
+    error occured while searching, $results will be a scalar variable
+    containing an error message.
+
+    $results = $index->search({ first_field => '+andword -notword orword
+    "phrase words"', second_field => ... ... });
+
+    if (ref $results) { print "The score for $document_id is $results-
+    >{$document_id}\n"; } else { print "Error: $results\n"; }
+
+  $index->delete
+
+    delete() removes the tables associated with a TextIndex from index_dbh.
+
+CHANGES
+    0.02 Added or_mask_sets.
+
+    0.01 Initial public release. Should be considered beta, and methods may
+    be added or changed until the first stable release.
+
+AUTHOR
+    Daniel Koch, dkoch@amcity.com
+
+COPYRIGHT
+    Copyright 1997, 1998, 1999 by Daniel Koch. All rights reserved.
+
+LICENSE
+    This package is free software; you can redistribute it and/or modify it
+    under the same terms as Perl itself, i.e., under the terms of the
+    "Artistic License" or the "GNU General Public License".
+
+DISCLAIMER
+    This package is distributed in the hope that it will be useful, but
+    WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+    See the "GNU General Public License" for more details.
+
+ACKNOWLEDGEMENTS
+    Thanks to Ulrich Pfeifer for ideas and code from Man::Index module in
+    "Information Retrieval, and What pack 'w' Is For" article from The Perl
+    Journal vol. 2 no. 2.
+
+    Thanks to Steffen Beyer for the Bit::Vector module, which enables fast
+    set operations in this module. Version 5.3 or greater of Bit::Vector is
+    required by DBIx::TextIndex.
+
+BUGS
+    Uses too much memory.
+
+    MySQL-specific SQL is used.
+
+    Parser is not very good.
+
+    Documentation is not complete.
+
+    Phrase searching relies on full-table scan. Any suggestions for adding
+    word-proximity information to the index would be much appreciated.
+
+    No facility for deleting documents from an index. Work-around: create a
+    new index.
+
+    Please feel free to email me (dkoch@amcity.com) with any questions or
+    suggestions.
+
+SEE ALSO
+    perl(1).
+
