@@ -93,10 +93,10 @@ DESCRIPTION
 
   $index->search(\%search_args)
 
-    search() returns $results, a reference to a hash. The values of the hash
-    are document ids, keyed by the relative score of the document. If an
-    error occured while searching, $results will be a scalar variable
-    containing an error message.
+    search() returns $results, a reference to a hash. The keys of the hash
+    are document ids, and the values are the relative scores of the
+    documents. If an error occured while searching, $results will be a
+    scalar variable containing an error message.
 
     $results = $index->search({ first_field => '+andword -notword orword
     "phrase words"', second_field => ... ... });
@@ -109,9 +109,19 @@ DESCRIPTION
     delete() removes the tables associated with a TextIndex from index_dbh.
 
 CHANGES
+    0.04 Bug fix: add_document() will return if passed empty array ref
+    instead of producing error.
+
+         Changed _boolean_compare() and _phrase_search() so and_words and
+    phrases behave better in multiple-field searches. Result set for each
+    field is calculated first, then union of all fields is taken for
+    final result set.
+
+         Scores are scaled lower in _search().
+
     0.03 Added example scripts in examples/.
 
-    0.02 Added or_mask_sets.
+    0.02 Added or_mask_set.
 
     0.01 Initial public release. Should be considered beta, and methods may
     be added or changed until the first stable release.
@@ -144,7 +154,7 @@ ACKNOWLEDGEMENTS
     required by DBIx::TextIndex.
 
 BUGS
-    Uses too much memory.
+    Uses quite a bit of memory.
 
     MySQL-specific SQL is used.
 

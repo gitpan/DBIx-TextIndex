@@ -5,7 +5,7 @@ use strict;
 use Bit::Vector;
 use Carp qw(carp croak);
 
-$DBIx::TextIndex::VERSION = '0.03';
+$DBIx::TextIndex::VERSION = '0.04';
 
 # Largest size word to be indexed
 my $MAX_WORD = 30;
@@ -48,6 +48,7 @@ sub new {
 	}
     }
 
+    $self->{PRINT_ACTIVITY} = 0;
     $self->{PRINT_ACTIVITY} = $args->{'print_activity'};
 
     unless ($self->_fetch_collection_info) {
@@ -114,6 +115,8 @@ sub add_document {
 
     my $ids = shift;
 
+    return if $#$ids < 0;
+
     if ($self->{PRINT_ACTIVITY}) {
 	my $add_count = $#{$ids} + 1;
 	print "Adding $add_count documents\n";
@@ -136,14 +139,13 @@ sub add_document {
 	    my %frequency;
 	    my $maxtf = 0;
 
-	    my $word_count;
+	    my $word_count = 0;
 
 	    foreach my $word ($self->_words($self->_fetch_document($document_id, $self->{DOCUMENT_FIELDS}->[$field_no]))) {
 		$frequency{$word}++;
 		$maxtf = $frequency{$word} if $frequency{$word} > $maxtf;
 		$word_count++;
 	    }
-
 	    print " $word_count" if $self->{PRINT_ACTIVITY};
 
 	    while (my ($word, $frequency) = each %frequency) {
@@ -424,50 +426,49 @@ sub _phrase_search {
 
     return if $#result_documents < 0;
 
+    return if $#result_documents > $PHRASE_THRESHOLD;
+
     my ($sql, $sth);
 
-    if ($#result_documents < $PHRASE_THRESHOLD) {
+    my $result_documents = join ',', @result_documents;
 
-	my $result_documents = join ',', @result_documents;
+    my $vec_size = $self->{MAX_INDEXED_ID} + 1;
 
-	foreach my $field_no ( @{$self->{QUERY_FIELD_NOS}} ) {
-	    foreach my $phrase ( @{$self->{QUERY_PHRASES}->[$field_no]} ) {
+    my $phrase_vector;
+    my $i = 0;
+    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
+	foreach my $phrase ( @{$self->{QUERY_PHRASES}->[$fno]} ) {
+	    $sql = qq(
+		      select $self->{DOCUMENT_ID_FIELD}
+		      from $self->{DOCUMENT_TABLE}
+		      where $self->{DOCUMENT_ID_FIELD} in ($result_documents)
+		      and $self->{DOCUMENT_FIELDS}->[$fno] like 
+		      ?
+		      );
 
-		$sql = qq(
-			  select $self->{DOCUMENT_ID_FIELD}
-			  from $self->{DOCUMENT_TABLE}
-			  where $self->{DOCUMENT_ID_FIELD} in ($result_documents)
-			  and $self->{DOCUMENT_FIELDS}->[$field_no] like 
-			  ?
-			  );
-
-		$sth = $self->{DOCUMENT_DBH}->prepare($sql);
-
-		$sth->execute("%$phrase%");
-
-		my $document_id;
-
-		$sth->bind_col(1, \$document_id);
-
-		my @phrase_result;
-
-		while ($sth->fetch) {
-		    push @phrase_result, $document_id;
-		}
-
-		$sth->finish;
-
-		my $phrase_vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
-		$phrase_vector->Index_List_Store(@phrase_result);
-
-		$self->{RESULT_VECTOR}->Intersection($phrase_vector,
-						     $self->{RESULT_VECTOR});
+	    $sth = $self->{DOCUMENT_DBH}->prepare($sql);
+	    $sth->execute("%$phrase%");
+	    my $document_id;
+	    $sth->bind_col(1, \$document_id);
+	    my @phrase_result;
+	    while ($sth->fetch) {
+		push @phrase_result, $document_id;
 	    }
+	    $sth->finish;
+	    
+	    my $vector = Bit::Vector->new($vec_size);
+	    $vector->Index_List_Store(@phrase_result);
+	    if ($i == 0) {
+		$phrase_vector = $vector;
+	    } else {
+		$phrase_vector->Union($phrase_vector, $vector);
+	    }
+	    $i++;
 	}
-    } else {
-	return;
     }
-
+    return if $i < 1;
+    $self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR},
+					 $phrase_vector);
 }
 
 sub _vector_search {
@@ -523,7 +524,6 @@ sub _search {
     my @result_documents = $self->{RESULT_VECTOR}->Index_List_Read;
 
     return $ERROR{'no_results'} unless $#result_documents >= 0;
-
 
     my %score;
 
@@ -581,9 +581,9 @@ sub _search {
 		    my $maxtf = $self->{MAXTF}->[$field_no]->[$document_id];
 		    if ($score{$document_id}) {
 			$score{$document_id} *=
-			    (100 * ($word_score{$document_id}/sqrt($maxtf)) * $idf);
+			    (1 + (($word_score{$document_id}/sqrt($maxtf)) * $idf));
 		    } else {
-			$score{$document_id} = (100 * ($word_score{$document_id}/sqrt($maxtf)) * $idf);
+			$score{$document_id} = (1 + (($word_score{$document_id}/sqrt($maxtf)) * $idf));
 		    }
 		}
 	    }
@@ -628,48 +628,54 @@ sub _boolean_compare {
 
     my $self = shift;
 
-    my $or_word_count = 0; my $and_word_count = 0;
+    my $vec_size = $self->{MAX_INDEXED_ID} + 1;
 
-    foreach my $field_no ( @{$self->{QUERY_FIELD_NOS}} ) {
+    my @vector;
+    my $i = 0;
+    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
 
-	$or_word_count += $#{ $self->{QUERY_OR_WORDS}->[$field_no] } + 1;
-	$and_word_count += $#{ $self->{QUERY_AND_WORDS}->[$field_no] } + 1;
+	my $or_word_count = 0; my $and_word_count = 0;
 
-    }
+	$or_word_count = $#{ $self->{QUERY_OR_WORDS}->[$fno] } + 1;
+	$and_word_count = $#{ $self->{QUERY_AND_WORDS}->[$fno] } + 1;
 
-    $self->{OR_WORD_COUNT} = $or_word_count;
-    $self->{AND_WORD_COUNT} = $and_word_count;
+	$self->{OR_WORD_COUNT} += $or_word_count;
+	$self->{AND_WORD_COUNT} += $and_word_count;
 
-    $self->{RESULT_VECTOR} = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
+	$vector[$i] = Bit::Vector->new($vec_size);
 
-    if ($or_word_count < 1) {
-	$self->{RESULT_VECTOR}->Fill;
-    } else {
-	$self->{RESULT_VECTOR}->Empty;
-    }
+	if ($or_word_count < 1) {
+	    $vector[$i]->Fill;
+	} else {
+	    $vector[$i]->Empty;
+	}
 
-    foreach my $field_no ( @{$self->{QUERY_FIELD_NOS}} ) {
-	foreach my $word ( @{$self->{QUERY_OR_WORDS}->[$field_no]} ) {
-
-	    $self->{RESULT_VECTOR}->Union($self->{RESULT_VECTOR},
-					  $self->{VECTOR}->[$field_no]->{$word});
+	foreach my $word ( @{$self->{QUERY_OR_WORDS}->[$fno]} ) {
+	    $vector[$i]->Union($vector[$i],
+				 $self->{VECTOR}->[$fno]->{$word});
 
 	}
 
-	foreach my $word ( @{$self->{QUERY_AND_WORDS}->[$field_no]} ) {
-
-	    $self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR},
-						 $self->{VECTOR}->[$field_no]->{$word});
+	foreach my $word ( @{$self->{QUERY_AND_WORDS}->[$fno]} ) {
+	    $vector[$i]->Intersection($vector[$i],
+					$self->{VECTOR}->[$fno]->{$word});
 
 	}
 
-	foreach my $word ( @{$self->{QUERY_NOT_WORDS}->[$field_no]} ) {
+	foreach my $word ( @{$self->{QUERY_NOT_WORDS}->[$fno]} ) {
+	    $self->{VECTOR}->[$fno]->{$word}->Flip;
+	    $vector[$i]->Intersection($vector[$i],
+					$self->{VECTOR}->[$fno]->{$word});
 
-	    $self->{VECTOR}->[$field_no]->{$word}->Flip;
+	}
+	$i++;
+    }
 
-	    $self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR},
-						 $self->{VECTOR}->[$field_no]->{$word});
+    $self->{RESULT_VECTOR} = $vector[0];
 
+    if ($#vector > 0) {
+	foreach my $vector (@vector[1 .. $#vector]) {
+	    $self->{RESULT_VECTOR}->Union($self->{RESULT_VECTOR}, $vector);
 	}
     }
 }
@@ -963,6 +969,7 @@ sub _commit_documents {
 	} else {
 	    @maxtf = @{$self->{NEW_MAXTF}->[$field_no]};
 	}
+	$maxtf[0] = 0 unless defined $maxtf[0];
 	my $packed_maxtf = pack 'w' x ($#maxtf + 1), @maxtf;
 	$sth->execute($field_no, $packed_maxtf);
     }
@@ -983,7 +990,7 @@ sub _commit_documents {
 
 	$i_sth = $self->{INDEX_DBH}->prepare($sql);
 
-	print ("field$field_no ", scalar keys %{$self->{DOCUMENTS}->[$field_no]},
+	print("field$field_no ", scalar keys %{$self->{DOCUMENTS}->[$field_no]},
 	       " distinct words\n") if $self->{PRINT_ACTIVITY};
 
 	while (my ($word, $documents) = each %{$self->{DOCUMENTS}->[$field_no]}) {
@@ -1305,10 +1312,10 @@ documents will yield unpredictable results!
 
 =head2 $index->search(\%search_args)
 
-search() returns $results, a reference to a hash.  The values of the
-hash are document ids, keyed by the relative score of the document.  If
-an error occured while searching, $results will be a scalar variable
-containing an error message.
+search() returns $results, a reference to a hash.  The keys of the
+hash are document ids, and the values are the relative scores of the
+documents.  If an error occured while searching, $results will be
+a scalar variable containing an error message.
 
 $results = $index->search({
     first_field => '+andword -notword orword "phrase words"',
@@ -1327,6 +1334,16 @@ if (ref $results) {
 delete() removes the tables associated with a TextIndex from index_dbh.
 
 =head1 CHANGES
+
+0.04 Bug fix: add_document() will return if passed empty array ref instead
+of producing error.
+
+     Changed _boolean_compare() and _phrase_search() so and_words and
+phrases behave better in multiple-field searches. Result set for each
+field is calculated first, then union of all fields is taken for
+final result set.
+
+     Scores are scaled lower in _search().
 
 0.03 Added example scripts in examples/.
 
@@ -1370,7 +1387,7 @@ Bit::Vector is required by DBIx::TextIndex.
 
 =head1 BUGS
 
-Uses too much memory.
+Uses quite a bit of memory.
 
 MySQL-specific SQL is used.
 

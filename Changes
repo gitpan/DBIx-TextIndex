@@ -1,7 +1,17 @@
 Revision history for Perl extension DBIx::TextIndex.
+0.04 Bug fix: add_document() will return if passed empty array ref
+     instead of producing error.
+
+     Changed _boolean_compare() and _phrase_search() so and_words and
+     phrases behave better in multiple-field searches. Result set for each
+     field is calculated first, then union of all fields is taken for
+     final result set.
+
+     Scores are scaled lower in _search().
+
 0.03 Added example scripts in examples/.
 
 0.02 Added or_mask_set.
 
-0.01 Initial public release.  Should be considered beta, and methods may be
-added or changed until the first stable release.
+0.01 Initial public release. Should be considered beta, and methods may
+     be added or changed until the first stable release.
