@@ -254,31 +254,18 @@ sub db_fetch_docs {
     my $table = shift;
 
     return <<END;
-select docs
+select term_docs
 from $table
 where word = ?
 END
 
 }
 
-sub db_fetch_freq_and_docs_vector {
+sub db_fetch_term_freq_and_docs {
     my $self = shift;
     my $table = shift;
-
     return <<END;
-select docfreq_t, docs_vector
-from $table
-where word = ?
-END
-
-}
-
-sub db_fetch_docs_vector {
-    my $self = shift;
-    my $table = shift;
-
-    return <<END;
-select docs_vector
+select docfreq_t, term_docs
 from $table
 where word = ?
 END
@@ -336,8 +323,8 @@ sub db_inverted_replace {
 
     return <<END;
 replace into $table
-(word, docfreq_t, docs_vector, docs)
-values (?, ?, ?, ?)
+(word, docfreq_t, term_docs)
+values (?, ?, ?)
 END
 
 }
@@ -358,7 +345,7 @@ sub db_inverted_select {
     my $table = shift;
 
     return <<END;
-select docfreq_t, docs_vector, docs
+select docfreq_t, term_docs
 from $table
 where word = ?
 END
@@ -403,7 +390,6 @@ CREATE TABLE $self->{ALL_DOCS_VECTOR_TABLE} (
 END
 }
 
-
 sub db_create_inverted_table {
     my $self = shift;
     my $table = shift;
@@ -413,8 +399,7 @@ sub db_create_inverted_table {
 create table $table (
   word             varchar($max_word)      not null,
   docfreq_t 	   int unsigned 	   not null,
-  docs_vector mediumblob 		   not null,
-  docs	   mediumblob 		   not null,
+  term_docs	   mediumblob 		   not null,
   PRIMARY KEY 	   word_key (word)
 )
 END

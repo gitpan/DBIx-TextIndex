@@ -88,6 +88,7 @@ PPCODE:
 		value = (value << 7) + (temp & 0x7f);
 	    } while (temp & 0x80);
 	}
+
 	if ( freq_is_next ) {
 	    av_push(results, newSViv(value));
             freq_is_next = 0;
@@ -104,6 +105,54 @@ PPCODE:
     }
     XPUSHs(sv_2mortal(newRV_noinc((SV *)results)));
 }
+
+void
+term_doc_ids_arrayref(packed)
+SV *packed
+PPCODE:
+{
+    AV *results;
+    char *string;
+    STRLEN len;
+    int length;
+    unsigned int value;
+    int freq_is_next = 0;
+    unsigned int doc = 0;
+    char temp;
+
+    string = SvPV(packed, len);
+    length = len;
+    results = newAV();
+    /* last byte cannot have high bit set */
+    if (*(string + length) & 0x80)
+        TEXTINDEX_ERROR("unterminated compressed integer");
+    while (length > 0) {
+	value = *string++; length--;
+	if (value & 0x80)
+	{
+	    value &= 0x7f;
+	    do
+	    {
+		temp = *string++; length--;
+		value = (value << 7) + (temp & 0x7f);
+	    } while (temp & 0x80);
+	}
+
+	if ( freq_is_next ) {
+            freq_is_next = 0;
+	    continue;
+        }
+
+	doc += value >> 1;
+	   av_push(results, newSViv(doc));
+
+	if (! (value & 1)) {
+	    freq_is_next = 1;
+	}
+    }
+    XPUSHs(sv_2mortal(newRV_noinc((SV *)results)));
+}
+
 
 void
 term_docs_array(packed)

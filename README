@@ -459,6 +459,19 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.15
+    WARNING: indexes will have to be recreated after upgrading to this version
+
+    Changed inverted list tables: renamed "docs" to "term_docs" and removed
+    redundant column "docs_vector".  Bit vectors are now built from postings
+    stored in term_docs column.  Total index size should be reduced
+    significantly with removal of docs_vector column.
+
+    Implemented DBIx::TextIndex::TermDocsCache to reduce database queries
+
+    Fixed bug where single word queries for high doc frequency terms would
+    return no results
+
 0.14
     Fixed memory leak in integer decoding
 

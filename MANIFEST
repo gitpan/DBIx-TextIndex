@@ -13,6 +13,8 @@ eg/html_search.cgi
 eg/search.pl
 eg/remove.pl
 lib/DBIx/TextIndex.pm
+lib/DBIx/TextIndex/Exception.pm
+lib/DBIx/TextIndex/TermDocsCache.pm
 lib/DBIx/TextIndex/mysql.pm
 lib/DBIx/TextIndex/stop-en.pm
 lib/DBIx/TextIndex/stop-cz.pm
