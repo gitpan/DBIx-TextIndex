@@ -2,6 +2,17 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.18
+    Fixed bug where Okapi function did not score multiple fields
+
+    Tweaks to improve boolean search performance.
+
+    Added periodic flush of hash tables caches to save memory
+    in long-running instances.
+
+    Used a more compact represention of docweights, index needs to be
+    recreated.
+
 0.17
     Reduced memory usage by TermDocsCache
 

@@ -2,7 +2,7 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.17';
+our $VERSION = '0.18';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -39,6 +39,9 @@ my $RESULT_THRESHOLD = 5000;
 # Document score accumulator, higher numbers increase scoring accuracy
 # but use more memory and cpu
 my $ACCUMULATOR_LIMIT = 20000;
+
+# Clear out the hash key caches after this many searches
+my $SEARCH_CACHE_FLUSH_INTERVAL = 500;
 
 # Practical number of rows RDBMS can scan in acceptable amount of time
 my $PHRASE_THRESHOLD = 1000;
@@ -209,6 +212,9 @@ sub new {
         max_indexed_id => $self->max_indexed_id,
 	inverted_tables => $self->{INVERTED_TABLES},
     });
+
+    # Number of searches performed on this instance
+    $self->{SEARCH_COUNT} = 0;
 
     return $self;
 }
@@ -439,7 +445,7 @@ sub _docweights_remove {
 	foreach my $doc_id (@docs) {
 	    $w_d[$doc_id] = 0;
 	}
-	my $packed_w_d = join(',', @w_d);
+	my $packed_w_d = pack 'f*', @w_d;
 	# FIXME: we should update the average, leave it alone for now
 	$sth->execute($fno, $self->{AVG_W_D}->[$fno], $packed_w_d);
     }
@@ -526,24 +532,13 @@ sub unscored_search {
 }
 
 sub search {
-
     my $self = shift;
     my $query = shift;
     my $args = shift;
 
-    # check to see if documents have been added since we last called new()
-    my $new_max_indexed_id = $self->fetch_max_indexed_id;
-    if ($new_max_indexed_id != $self->{MAX_INDEXED_ID}) {
-	# flush things that stick around
-	$self->max_indexed_id($new_max_indexed_id);
-	$self->{C}->max_indexed_id($new_max_indexed_id);
-	delete($self->{VECTOR});
-	delete($self->{ALL_DOCS_VECTOR});
-	delete($self->{W_D});
-	delete($self->{AVG_W_D});
-	delete($self->{MASK});
-	delete($self->{MASK_VECTOR});
-    }
+    $self->{SEARCH_COUNT}++;
+
+    $self->_flush_cache;
 
     $self->{OR_WORD_COUNT} = 0;
     $self->{AND_WORD_COUNT} = 0;
@@ -605,6 +600,7 @@ sub search {
     }
 
     my $scoring_method = $args->{scoring_method} || $self->{SCORING_METHOD};
+
     my $results;
     if ($scoring_method eq 'okapi') {
 	$results = $self->_search_okapi;
@@ -613,10 +609,32 @@ sub search {
     } else {
 	throw $GEN( error => "Invalid scoring method $scoring_method, select okapi or legacy_tfidf");
     }
-
     $self->{C}->flush;
 
     return $results;
+}
+
+
+sub _flush_cache {
+    my $self = shift;
+    # flush masks every time
+    delete($self->{VALID_MASK});
+    delete($self->{MASK});
+    delete($self->{MASK_FETCH_LIST});
+    delete($self->{MASK_VECTOR});
+    # check to see if documents have been added since we last called new()
+    my $new_max_indexed_id = $self->fetch_max_indexed_id;
+    if (($new_max_indexed_id != $self->{MAX_INDEXED_ID})
+	|| ($self->{SEARCH_COUNT} > $SEARCH_CACHE_FLUSH_INTERVAL)) {
+	# flush things that stick around
+	$self->max_indexed_id($new_max_indexed_id);
+	$self->{C}->max_indexed_id($new_max_indexed_id);
+	delete($self->{VECTOR});
+	delete($self->{ALL_DOCS_VECTOR});
+	delete($self->{W_D});
+	delete($self->{AVG_W_D});
+	$self->{SEARCH_COUNT} = 0;
+    }
 }
 
 sub highlight {
@@ -1197,7 +1215,7 @@ sub _fetch_docweights {
 
 	while (my $row = $sth->fetchrow_arrayref) {
 	    $self->{AVG_W_D}->[$row->[0]] = $row->[1];
-	    $self->{W_D}->[$row->[0]] = [split(/,/,$row->[2])];
+	    $self->{W_D}->[$row->[0]] = [ unpack('f*', $row->[2]) ];
 	}
 
 	$sth->finish;
@@ -1232,30 +1250,31 @@ sub _search_okapi {
     my $result_max = $self->{RESULT_VECTOR}->Max;
     my $result_min = $self->{RESULT_VECTOR}->Min;
 
-    $aW_d = $self->{AVG_W_D}->[$fno];
-    foreach my $term (@{$self->{TERMS}->[$fno]}) {
-	$f_t = $self->{C}->f_t($fno, $term);
-	$idf =  log(($N - $f_t + 0.5) / ($f_t + 0.5));
-	next if $idf < $IDF_MIN_OKAPI;
-	$f_qt = $self->{F_QT}->[$fno]->{$term};      # freq of term in query
-	my $w_qt = (($k3 + 1) * $f_qt) / ($k3 + $f_qt); # query term weight
-	my $term_docs = $self->{C}->term_docs_arrayref($fno, $term);
-	for (my $i = 0; ($i < (2 * $f_t))
-	       && ($acc_size < $ACCUMULATOR_LIMIT) ; $i += 2) {
-	    $doc_id = $term_docs->[$i];
-	    last if $doc_id > $result_max;
-	    next if $doc_id < $result_min;
-	    next unless $self->{RESULT_VECTOR}->bit_test($doc_id);
-	    $f_dt = $term_docs->[$i + 1];
-	    $W_d = $self->{W_D}->[$fno]->[$i];
+    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
+	$aW_d = $self->{AVG_W_D}->[$fno];
+	foreach my $term (@{$self->{TERMS}->[$fno]}) {
+	    $f_t = $self->{C}->f_t($fno, $term);
+	    $idf =  log(($N - $f_t + 0.5) / ($f_t + 0.5));
+	    next if $idf < $IDF_MIN_OKAPI;
+	    $f_qt = $self->{F_QT}->[$fno]->{$term};     # freq of term in query
+	    my $w_qt = (($k3 + 1) * $f_qt) / ($k3 + $f_qt); # query term weight
+	    my $term_docs = $self->{C}->term_docs_arrayref($fno, $term);
+	    for (my $i = 0; ($i < (2 * $f_t))
+		 && ($acc_size < $ACCUMULATOR_LIMIT) ; $i += 2) {
+		$doc_id = $term_docs->[$i];
+		last if $doc_id > $result_max;
+		next if $doc_id < $result_min;
+		next unless $self->{RESULT_VECTOR}->bit_test($doc_id);
+		$f_dt = $term_docs->[$i + 1];
+		$W_d = $self->{W_D}->[$fno]->[$i];
 
-	    my $TF = ( (($k1 + 1) * $f_dt) /
+		my $TF = ( (($k1 + 1) * $f_dt) /
 		       ($k1 * ((1 - $b) + (($b * $W_d)/$aW_d)) + $f_dt ) );
 
-	    $score{$doc_id} += $idf * $TF * $w_qt;
+		$score{$doc_id} += $idf * $TF * $w_qt;
 
-	    $acc_size = scalar keys %score;
-
+		$acc_size = scalar keys %score;
+	    }
 	}
     }
     unless (scalar keys %score) {
@@ -1439,8 +1458,8 @@ sub _boolean_compare {
     my @vectors;
     my $i = 0;
     foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
-
 	$vectors[$i] = Bit::Vector->new($vec_size);
+
 	if ($self->{OR_WORD_COUNT} < 1) {
 	    $vectors[$i]->Fill;
 	} else {
@@ -1450,26 +1469,23 @@ sub _boolean_compare {
 	foreach my $word ( @{$self->{QUERY_OR_WORDS}->[$fno]} ) {
 	    $vectors[$i]->Union($vectors[$i],
 				 $self->{VECTOR}->[$fno]->{$word});
-
 	}
 
 	foreach my $word ( @{$self->{QUERY_AND_WORDS}->[$fno]} ) {
 	    $vectors[$i]->Intersection($vectors[$i],
 					$self->{VECTOR}->[$fno]->{$word});
-
 	}
 
 	foreach my $word ( @{$self->{QUERY_NOT_WORDS}->[$fno]} ) {
 	    $self->{VECTOR}->[$fno]->{$word}->Flip;
 	    $vectors[$i]->Intersection($vectors[$i],
 					$self->{VECTOR}->[$fno]->{$word});
-
 	}
 	$i++;
     }
 
-    $self->{RESULT_VECTOR} = Bit::Vector->new($vec_size);
-    $self->{RESULT_VECTOR}->Index_List_Store($self->all_doc_ids);
+    $self->fetch_all_docs_vector;
+    $self->{RESULT_VECTOR} = $self->{ALL_DOCS_VECTOR}->Clone;
 
     foreach my $vector (@vectors) {
 	$self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR}, $vector);
@@ -1482,7 +1498,6 @@ sub _apply_mask {
     my $self = shift;
 
     return unless $self->{MASK};
-
     if ($self->_fetch_mask) {
 	$self->{VALID_MASK} = 1;
     }
@@ -1546,8 +1561,8 @@ sub _apply_mask {
 }
 
 sub _fetch_mask {
-
     my $self = shift;
+
     my $sql = $self->db_fetch_mask;
     my $sth = $self->{INDEX_DBH}->prepare($sql);
 
@@ -1555,6 +1570,11 @@ sub _fetch_mask {
     my $i = 0;
 
     foreach my $mask (@{$self->{MASK_FETCH_LIST}}) {
+	if (ref ($self->{MASK_VECTOR}->{$mask})) {
+	    # We already have one, go ahead
+	    $mask_count++;
+	    next;
+	}
 
 	$sth->execute($mask);
 
@@ -1571,8 +1591,6 @@ sub _fetch_mask {
 	$i++;
 
     }
-
-    $sth->finish;
     return $mask_count;
 }
 
@@ -1861,7 +1879,7 @@ sub _commit_docs {
 	my $avg_w_d = $sum / $id_b; 
 	$w_d[0] = 0 unless defined $w_d[0];
 	# FIXME: this takes too much space
-	my $packed_w_d = join(',', @w_d);
+	my $packed_w_d = pack 'f*', @w_d;
 	$sth->execute($fno, $avg_w_d, $packed_w_d);
     }
     # Delete temporary in-memory structure
@@ -1943,9 +1961,9 @@ sub all_doc_ids {
 
     unless (ref $self->{ALL_DOCS_VECTOR}) {
 	$self->{ALL_DOCS_VECTOR} = Bit::Vector->new_Enum(
-               $self->max_indexed_id + 1,
-	       $self->_fetch_all_docs_vector
-	   );
+            $self->max_indexed_id + 1,
+	    $self->_fetch_all_docs_vector
+	);
     }
 
     if (@ids) {
@@ -1959,12 +1977,18 @@ sub all_doc_ids {
     return $self->{ALL_DOCS_VECTOR}->Index_List_Read;
 }
 
+sub fetch_all_docs_vector {
+    my $self = shift;
+    unless (ref $self->{ALL_DOCS_VECTOR}) {
+	$self->{ALL_DOCS_VECTOR} = Bit::Vector->new_Enum(
+            $self->max_indexed_id + 1,
+	    $self->_fetch_all_docs_vector
+	);
+    }
+}
 
 sub _fetch_all_docs_vector {
     my $self = shift;
-    my $fno = shift;
-    my $word = shift;
-
     my $sql = $self->db_fetch_all_docs_vector;
     return scalar $self->{INDEX_DBH}->selectrow_array($sql);
 }
