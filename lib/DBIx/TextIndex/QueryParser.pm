@@ -4,6 +4,8 @@ use strict;
 
 our $VERSION = '0.20';
 
+use base qw(DBIx::TextIndex);
+
 use DBIx::TextIndex::Exception;
 use Text::Balanced qw(extract_bracketed extract_delimited);
 
@@ -13,6 +15,10 @@ sub new {
     my $pkg = shift;
     my $class = ref($pkg) || $pkg;
     my $self = bless {}, $class;
+    my $args = shift || {};
+    foreach my $field (keys %$args) {
+	$self->{uc($field)} = $args->{$field};
+    }
     return $self;
 }
 
@@ -31,6 +37,7 @@ sub _parse {
     my $self = shift;
     my $q = shift;
     my @clauses;
+    my $term;
 
     $q =~ s/\s+$//;
 
@@ -81,7 +88,7 @@ sub _parse {
 	    $extract =~ s/^\"//;
 	    $extract =~ s/\"$//;
 	    $clause->{TYPE} = 'PHRASE';
-	    $clause->{TERM} = $extract;
+	    $term = $extract;
 	    $clause->{PHRASETERMS} = $self->_parse($extract);
 	    if ($q =~ s/^~(\d+)//) {
 		$clause->{PROXIMITY} = $1;
@@ -90,19 +97,23 @@ sub _parse {
 	    }
 	} elsif ($q =~ s/^(\S+[\-\&\.\@\'\*]\S+)//) {
 	    $clause->{TYPE} = 'IMPLICITPHRASE';
-	    $clause->{TERM} = $1;
+	    $term = $1;
 	    $clause->{PHRASETERMS} =
-	     $self->_parse(join(' ', split('[\-\&\.\@\'\*]',$clause->{TERM})));
+	     $self->_parse(join(' ', split('[\-\&\.\@\'\*]',$term)));
 	} elsif ($q =~ s/^(\S+)\?//) {
 	    $clause->{TYPE} = 'PLURAL';
-	    $clause->{TERM} = $1;
+	    $term = $1;
 	} elsif ($q =~ s/^(\S+)\*\s*//) {
 	    $clause->{TYPE} = 'WILD';
-	    $clause->{TERM} = $1;
+	    $term = $1;
 	} else {
 	    $q =~ s/(\S+)//;
 	    $clause->{TYPE} = 'TERM';
-	    $clause->{TERM} = $1;
+	    $term = $1;
+	}
+	$clause->{TERM} = $self->_lc_and_unac($term) if $term;
+	if ($clause->{TERM}) {
+	    next unless $clause->{TERM} =~ m/[a-z0-9]/;
 	}
 	push @clauses, $clause;
     }

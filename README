@@ -463,6 +463,14 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.21
+    Fixed bug where proximity search was case-sensitive instead of
+    case-insensitive
+
+    Fixed problem where some punctuation characters in query were
+    treated as query terms instead of ignoring the characters
+    
+
 0.20
     Added inline fielded queries, e.g.:
     $index->search( field1 => 'field2:this field3:"that phrase" foo bar' );

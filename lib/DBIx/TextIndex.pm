@@ -2,7 +2,7 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.20';
+our $VERSION = '0.21';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -214,7 +214,7 @@ sub new {
 	inverted_tables => $self->{INVERTED_TABLES},
     });
 
-    $self->{QP} = DBIx::TextIndex::QueryParser->new;
+    $self->{QP} = DBIx::TextIndex::QueryParser->new({ charset => $self->{CHARSET} });
 
     # Number of searches performed on this instance
     $self->{SEARCH_COUNT} = 0;
@@ -598,6 +598,7 @@ sub search {
 	}
     }
 
+
     $self->_optimize_or_search;
     $self->_resolve_mask;
     $self->_boolean_search;
@@ -752,9 +753,9 @@ sub _resolve_phrase {
     }
 
     my @and_ids = $and_vec->Index_List_Read;
+    return $and_vec if $#and_ids < 0;
     unless ($self->{PINDEX}) {
 	return $and_vec if $#and_ids > $self->{PHRASE_THRESHOLD};
-	return $and_vec if $#and_ids < 0;
 	my $phrase_ids = $self->_phrase_fullscan(\@and_ids, $fno, $clause->{TERM});
 	$and_vec->Empty;
 	$and_vec->Index_List_Store(@$phrase_ids);

@@ -28,7 +28,7 @@ ok( ref $index eq 'DBIx::TextIndex' );
 
 my $results;
 
-my @top_docs  = (76, 3, 2, 0, 76, 105, 2, 2, 2, 13, 0);
+my @top_docs  = (76, 3, 2, 0, 76, 105, 2, 2, 2, 13, 0, 13, 6, 6, 6);
 
 my @terms = ('isle',
 	     'greedy',
@@ -41,6 +41,10 @@ my @terms = ('isle',
              'plot?',
 	     '"light winds"~3',
 	     '"light winds"~2',
+             '"LIGHT WINDS"~3',
+	     '"Lake Erie"~1',
+	     '"LAKE ERIE"~1',
+	     '"lake erie"~1',
              );	
 
 my @result_docs_tfidf;
