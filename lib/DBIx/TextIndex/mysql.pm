@@ -5,21 +5,17 @@
 use strict;
 
 sub db_add_mask {
-	my $self = shift;
-	my $mask_table = shift;
-	return "
-
-		REPLACE INTO $mask_table (mask, documents_vector)
-		VALUES (?, ?)
-
-    ";
+    my $self = shift;
+    return <<END;
+replace into $self->{MASK_TABLE} (mask, documents_vector)
+values (?, ?)
+END
 }
 
 sub db_delete_mask {
     my $self = shift;
-    my $mask_table = shift;
     return <<END;
-delete from $mask_table
+delete from $self->{MASK_TABLE}
 where mask = ?
 END
 }

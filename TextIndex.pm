@@ -8,7 +8,7 @@ use Data::Dumper qw(Dumper);
 
 my $ME = "DBIx::TextIndex";
 
-$DBIx::TextIndex::VERSION = '0.07';
+$DBIx::TextIndex::VERSION = '0.08';
 
 # Version number when collection table definition last changed
 my $LAST_COLLECTION_TABLE_UPGRADE = '0.07';
@@ -187,15 +187,16 @@ sub add_mask {
     my $vector = Bit::Vector->new($max_indexed_id + 1);
     $vector->Index_List_Store(@$ids);
 
-    $self->db_add_mask($self->{MASK_TABLE}, $mask, $vector->to_Enum);
+    print "Adding mask ($mask) to table $self->{MASK_TABLE}\n" if $PA > 1;
+    $self->{INDEX_DBH}->do($self->db_add_mask, undef, $mask, $vector->to_Enum);
     return 1;
 }
 
 sub delete_mask {
     my $self = shift;
     my $mask = shift;
-    my $sql = $self->db_delete_mask($self->{MASK_TABLE});
-    $self->{INDEX_DBH}->do($sql, undef, $mask);
+    print "Deleting mask ($mask) from table $self->{MASK_TABLE}\n" if $PA > 1;
+    $self->{INDEX_DBH}->do($self->db_delete_mask, undef, $mask);
 }
 
 sub add_document {

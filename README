@@ -425,6 +425,8 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.08 Bug fix: add_mask() was not inserting masks
+
 0.07 UPGRADE WARNING: collection table format changed, use new method
     $index->upgrade_collection_table() to recreate collection table. 
     Calling initialize() method for a new collection will also upgrade
