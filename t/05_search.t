@@ -28,7 +28,7 @@ ok( ref $index eq 'DBIx::TextIndex' );
 
 my $results;
 
-my @top_docs  = (76, 3, 2, 0, 76, 105, 2);
+my @top_docs  = (76, 3, 2, 0, 76, 105, 2, 2, 2, 13, 0);
 
 my @terms = ('isle',
 	     'greedy',
@@ -36,7 +36,12 @@ my @terms = ('isle',
 	     'aardvark',
 	     '+isle',
 	     '"captain he said"',
-	     'unweeting hap fordonne isle');
+	     'unweeting hap fordonne isle',
+	     'unweet*',
+             'plot?',
+	     '"light winds"~3',
+	     '"light winds"~2',
+             );	
 
 my @result_docs_tfidf;
 my @result_docs_okapi;
@@ -45,7 +50,7 @@ foreach my $term (@terms) {
     my $top_doc;
     eval {
 	$results = $index->search({ doc => $term },
-	                          { scoring_method => 'legacy_tfidf' });
+				  { scoring_method => 'legacy_tfidf' });
     };
     if ($@) {
 	if (ref $@ && $@->isa('DBIx::TextIndex::Exception::Query') ) {
@@ -68,8 +73,7 @@ is_deeply(\@result_docs_tfidf, \@top_docs);
 foreach my $term (@terms) {
     my $top_doc;
     eval {
-	$results = $index->search({ doc => $term },
-	                          { scoring_method => 'legacy_tfidf' });
+	$results = $index->search({ doc => $term });
     };
     if ($@) {
 	if (ref $@ && $@->isa('DBIx::TextIndex::Exception::Query') ) {

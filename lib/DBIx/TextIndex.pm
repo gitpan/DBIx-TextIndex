@@ -2,7 +2,7 @@ package DBIx::TextIndex;
 
 use strict;
 
-our $VERSION = '0.19';
+our $VERSION = '0.20';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -28,7 +28,7 @@ my $LAST_COLLECTION_TABLE_UPGRADE = '0.17';
 my $MAX_WORD_LENGTH = 20;
 
 # Minimum size of word base before a wildcard
-my $MIN_WILDCARD_LENGTH = 4;
+my $MIN_WILDCARD_LENGTH = 3;
 
 # Used to screen stop words from the scoring process
 my $IDF_MIN_LEGACY_TFIDF = 0.2;
@@ -73,8 +73,8 @@ my @COLLECTION_FIELDS = qw(
     charset
     stoplist
     proximity_index
-    error_quote_count
     error_empty_query
+    error_quote_count
     error_no_results
     error_no_results_stop
     max_word_length
@@ -548,17 +548,29 @@ sub search {
 
     throw $QRY( error => $ERROR{empty_query}) unless $query;
 
-    my @field_nos;
+    my @query_field_nos;
+    my %term_field_nos;
     while (my ($field, $query_string) = each %$query) {
 	next unless $query_string =~ m/\S+/;
 	throw $GEN( error => "invalid field ($field) in search()" )
 	    unless exists $self->{FIELD_NO}->{$field};
 	my $fno = $self->{FIELD_NO}->{$field};
 	$self->{QUERY}->[$fno] = $self->{QP}->parse($query_string);
-	push @field_nos, $self->{FIELD_NO}->{$field};
+	foreach my $fld ($self->{QP}->term_fields) {
+	    if ($fld eq '__DEFAULT') {
+		$term_field_nos{$fno}++;
+	    } else {
+		# FIXME: should we throw an exception here?
+		if (exists $self->{FIELD_NO}->{$fld}) {
+		    $term_field_nos{$self->{FIELD_NO}->{$fld}}++;
+		}
+	    }
+	}
+	push @query_field_nos, $self->{FIELD_NO}->{$field};
     }
-    throw $QRY( error => $ERROR{'empty_query'} ) unless $#field_nos >= 0;
-    @{$self->{QUERY_FIELD_NOS}} = sort { $a <=> $b } @field_nos;
+    throw $QRY( error => $ERROR{'empty_query'} ) unless $#query_field_nos >= 0;
+    @{$self->{QUERY_FIELD_NOS}} = sort { $a <=> $b } @query_field_nos;
+    @{$self->{TERM_FIELD_NOS}} = sort { $a <=> $b } keys %term_field_nos;
 
     foreach my $mask_type (@MASK_TYPE) {
 	if ($args->{$mask_type}) {
@@ -587,8 +599,8 @@ sub search {
     }
 
     $self->_optimize_or_search;
+    $self->_resolve_mask;
     $self->_boolean_search;
-    $self->_apply_mask;
 
     if ($args->{unscored_search}) {
 	my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
@@ -632,7 +644,11 @@ sub _boolean_search {
 	}
     }
 
-    foreach my $fno (@query_fnos) {
+    if ($self->{RESULT_MASK}) {
+	$self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR}, $self->{RESULT_MASK});
+    }
+
+    foreach my $fno (@{$self->{TERM_FIELD_NOS}}) {
 	my %f_t;
 	foreach my $term (@{$self->{TERMS}->[$fno]}) {
 	    $f_t{$term} = $self->{C}->f_t($fno, $term);
@@ -647,7 +663,7 @@ sub _boolean_search {
 
 sub _boolean_search_field {
     my $self = shift;
-    my ($fno, $clauses) = @_;
+    my ($field_no, $clauses) = @_;
 
     my $maxid = $self->max_indexed_id + 1;
     my $field_vec = $self->{ALL_DOCS_VECTOR}->Clone;
@@ -655,7 +671,10 @@ sub _boolean_search_field {
 
     foreach my $clause (@$clauses) {
 	my $clause_vec;
-
+	my $fno = $field_no;
+	if (exists $self->{FIELD_NO}->{$clause->{FIELD}}) {
+	    $fno = $self->{FIELD_NO}->{$clause->{FIELD}};
+	}
 	if ($clause->{TYPE} eq 'QUERY') {
 	    $clause_vec =
 		$self->_boolean_search_field($fno, $clause->{QUERY});
@@ -690,6 +709,16 @@ sub _boolean_search_field {
 	} elsif ($clause->{MODIFIER} eq 'AND'
 		 || $clause->{CONJ} eq 'AND') {
 	    $field_vec->Intersection($field_vec, $clause_vec);
+	} elsif ($clause->{CONJ} eq 'OR') {
+	    if ($#or_vecs >= 0) {
+		my $all_ors_vec = Bit::Vector->new($maxid);
+		foreach my $or_vec (@or_vecs) {
+		    $all_ors_vec->Union($all_ors_vec, $or_vec);
+		}
+		$field_vec->Intersection($field_vec, $all_ors_vec);
+		@or_vecs = ();
+	    }
+	    $field_vec->Union($field_vec, $clause_vec);
 	} else {
 	    push @or_vecs, $clause_vec;
 	}
@@ -702,6 +731,7 @@ sub _boolean_search_field {
 	}
 	$field_vec->Intersection($field_vec, $all_ors_vec);
     }
+
     return $field_vec;
 
 }
@@ -716,13 +746,25 @@ sub _resolve_phrase {
 	$and_vec->Intersection($and_vec,
 		       $self->{C}->vector($fno, $term_clause->{TERM}));
     }
+    
+    if ($self->{RESULT_MASK}) {
+	$and_vec->Intersection($and_vec, $self->{RESULT_MASK});
+    }
+
     my @and_ids = $and_vec->Index_List_Read;
-    return $and_vec if $#and_ids > $self->{PHRASE_THRESHOLD};
-    return $and_vec if $#and_ids < 0;
-    my $phrase_ids = $self->_phrase_fullscan(\@and_ids, $fno, $clause->{TERM});
-    $and_vec->Empty;
-    $and_vec->Index_List_Store(@$phrase_ids);
-    return $and_vec;
+    unless ($self->{PINDEX}) {
+	return $and_vec if $#and_ids > $self->{PHRASE_THRESHOLD};
+	return $and_vec if $#and_ids < 0;
+	my $phrase_ids = $self->_phrase_fullscan(\@and_ids, $fno, $clause->{TERM});
+	$and_vec->Empty;
+	$and_vec->Index_List_Store(@$phrase_ids);
+	return $and_vec;
+    } else {
+	my $phrase_ids = $self->_phrase_proximity(\@and_ids, $fno, $clause->{TERM}, $clause->{PROXIMITY});
+	$and_vec->Empty;
+	$and_vec->Index_List_Store(@$phrase_ids);
+	return $and_vec;
+    }
 }
 
 sub _resolve_plural {
@@ -730,9 +772,24 @@ sub _resolve_plural {
     my ($fno, $term) = @_;
     my $maxid = $self->max_indexed_id + 1;
     my $terms_union = Bit::Vector->new($maxid);
+    my $count = 0;
+    my $sum_f_t;
+    # FIXME: cheap hack
+    my $max_t;
+    my $max_f_t = 0;
     foreach my $t ($term, $term.'s') {
+	my $f_t = $self->{C}->f_t($fno, $t);
+	if ($f_t) {
+	    $count++;
+	    $sum_f_t += $f_t;
+	}
+	$max_t = $t, $max_f_t = $f_t if $f_t > $max_f_t;
 	$terms_union->Union($terms_union, $self->{C}->vector($fno, $t));
     }
+    $self->{F_T}->[$fno]->{$term} = int($sum_f_t/$count);
+    # FIXME: need to do a real merge
+    $self->{TERM_DOCS}->[$fno]->{$term} = $self->{C}->term_docs($fno, $max_t);
+
     return $terms_union;
 }
 
@@ -746,22 +803,40 @@ sub _resolve_wild {
     my $sql = $self->db_fetch_words($self->{INVERTED_TABLES}->[$fno]);
     my $terms = $self->{INDEX_DBH}->selectcol_arrayref($sql, undef, "$term%");
     my $terms_union = Bit::Vector->new($maxid);
-    foreach my $term (@$terms) {
-	$terms_union->Union($terms_union, $self->{C}->vector($fno, $term));
+    my $count = 0;
+    my $sum_f_t;
+    # FIXME: cheap hack
+    my $max_t;
+    my $max_f_t = 0;
+    foreach my $t (@$terms) {
+	my $f_t = $self->{C}->f_t($fno, $t);
+	if ($f_t) {
+	    $count++;
+	    $sum_f_t += $f_t;
+	}
+	$max_t = $t, $max_f_t = $f_t if $f_t > $max_f_t;
+	$terms_union->Union($terms_union, $self->{C}->vector($fno, $t));
     }
+    $self->{F_T}->[$fno]->{$term} = int($sum_f_t/$count);
+    # FIXME: need to do a real merge
+    $self->{TERM_DOCS}->[$fno]->{$term} = $self->{C}->term_docs($fno, $max_t);
+
     return $terms_union;
 }
 
 sub _flush_cache {
     my $self = shift;
     # flush masks every time
-    delete($self->{RESULTS_VECTOR});
+    delete($self->{RESULT_VECTOR});
+    delete($self->{RESULT_MASK});
     delete($self->{VALID_MASK});
     delete($self->{MASK});
     delete($self->{MASK_FETCH_LIST});
     delete($self->{MASK_VECTOR});
     delete($self->{TERMS});
     delete($self->{F_QT});
+    delete($self->{F_T});
+    delete($self->{TERM_DOCS});
     # check to see if documents have been added since we last called new()
     my $new_max_indexed_id = $self->fetch_max_indexed_id;
     if (($new_max_indexed_id != $self->{MAX_INDEXED_ID})
@@ -1056,32 +1131,32 @@ sub _fetch_collection_info {
     my $stoplists;
 
     my $null;
-    $sth->bind_columns(
-		       \$null,
-		       \$self->{VERSION},
-		       \$self->{MAX_INDEXED_ID},
-		       \$self->{DOC_TABLE},
-		       \$self->{DOC_ID_FIELD},
+    $sth->bind_columns(\(
+		       $null,
+		       $self->{VERSION},
+		       $self->{MAX_INDEXED_ID},
+		       $self->{DOC_TABLE},
+		       $self->{DOC_ID_FIELD},
 
-		       \$doc_fields,
-		       \$self->{CHARSET},
-		       \$stoplists,
-		       \$self->{PINDEX},
+		       $doc_fields,
+		       $self->{CHARSET},
+		       $stoplists,
+		       $self->{PINDEX},
 
-		       \$ERROR{empty_query},
-		       \$ERROR{quote_count},
-		       \$ERROR{no_results},
-		       \$ERROR{no_results_stop},
+		       $ERROR{empty_query},
+		       $ERROR{quote_count},
+		       $ERROR{no_results},
+		       $ERROR{no_results_stop},
 
-		       \$self->{MAX_WORD_LENGTH},
-		       \$self->{RESULT_THRESHOLD},
-		       \$self->{PHRASE_THRESHOLD},
-		       \$self->{MIN_WILDCARD_LENGTH},
+		       $self->{MAX_WORD_LENGTH},
+		       $self->{RESULT_THRESHOLD},
+		       $self->{PHRASE_THRESHOLD},
+		       $self->{MIN_WILDCARD_LENGTH},
 
-		       \$self->{DECODE_HTML_ENTITIES},
-		       \$self->{SCORING_METHOD},
-		       \$self->{UPDATE_COMMIT_INTERVAL},
-		       );
+		       $self->{DECODE_HTML_ENTITIES},
+		       $self->{SCORING_METHOD},
+		       $self->{UPDATE_COMMIT_INTERVAL},
+		       ));
 
     $sth->fetch;
     $sth->finish;
@@ -1098,93 +1173,47 @@ sub _fetch_collection_info {
 
 }
 
-sub _phrase_search {
+sub _phrase_fullscan {
     my $self = shift;
-    my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
-    return if $#result_docs < 0;
-    return if $#result_docs > $self->{PHRASE_THRESHOLD};
+    my $docref = shift;
+    my $fno = shift;
+    my $phrase = shift;
+    
+    my @docs = @{$docref};
+    my $docs = join(',', @docs);
+    my @found;
 
-    my $vec_size = $self->max_indexed_id + 1;
-    my $phrase_vector;
-    my $i = 0;
+    my $sql = $self->{CZECH_LANGUAGE} ? 
+	$self->db_phrase_scan_cz($docs, $fno) :
+	$self->db_phrase_scan($docs, $fno);
 
-    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
-    	my $phrase_c = 0;
-	foreach my $phrase ( @{$self->{QUERY_PHRASES}->[$fno]} ) {
-	    my @found;
-	    if (not $self->{PINDEX}) {
-                # full content scan
-                print "phrase search: '$phrase' using full content scan\n"
-                    if $PA;
-		@found = @{$self->_phrase_fullscan(\@result_docs, $fno,
-						   $phrase)};
-	    } else {
-                # proximity scan
-		my $proximity = $self->{QUERY_PROXIMITY}->[$fno]->[$phrase_c] ?
-		    $self->{QUERY_PROXIMITY}->[$fno]->[$phrase_c] : 1;
-		print "phrase search: '$phrase' using proximity index, proximity: $proximity\n"
-		    if $PA;				
-		@found = @{$self->_phrase_proximity(\@result_docs, $fno,
-						    $phrase, $proximity)};
-	    }
-	    
-	    my $vector = Bit::Vector->new($vec_size);
-	    $vector->Index_List_Store(@found);
-	    if ($i == 0) {
-		$phrase_vector = $vector;
-	    } else {
-		$phrase_vector->Union($phrase_vector, $vector);
-	    }
-	    $i++;
-	    $phrase_c++;
+    my $sth = $self->{DOC_DBH}->prepare($sql);
+
+    if ($self->{CZECH_LANGUAGE}) {
+	$sth->execute;
+    } else {
+	$sth->execute("%$phrase%");
+    }
+
+    my ($doc_id, $content);
+    if ($self->{CZECH_LANGUAGE}) {
+	$sth->bind_columns(\$doc_id, \$content);
+    } else {
+	$sth->bind_columns(\$doc_id);
+    }
+    
+    while($sth->fetch) {
+	if ($self->{CZECH_LANGUAGE}) {
+	    $content = $self->_lc_and_unac($content);
+	    push(@found, $doc_id) if (index($content, $phrase) != -1);
+	    print "content scan for $doc_id, phrase = $phrase\n"
+		if $PA > 1;
+	} else {
+	    push(@found, $doc_id);
 	}
     }
-    return if $i < 1;
-    $self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR},
-					 $phrase_vector);
-}
 
-sub _phrase_fullscan {
-	my $self = shift;
-	my $docref = shift;
-	my $fno = shift;
-	my $phrase = shift;
-
-	my @docs = @{$docref};
-	my $docs = join(',', @docs);
-	my @found;
-
-	my $sql = $self->{CZECH_LANGUAGE} ? 
-	    $self->db_phrase_scan_cz($docs, $fno) :
-	    $self->db_phrase_scan($docs, $fno);
-
-	my $sth = $self->{DOC_DBH}->prepare($sql);
-
-	if ($self->{CZECH_LANGUAGE}) {
-	    $sth->execute;
-	} else {
-	    $sth->execute("%$phrase%");
-	}
-
-	my ($doc_id, $content);
-	if ($self->{CZECH_LANGUAGE}) {
-	    $sth->bind_columns(\$doc_id, \$content);
-	} else {
-	    $sth->bind_columns(\$doc_id);
-	}
-    
-	while($sth->fetch) {
-	    if ($self->{CZECH_LANGUAGE}) {
-		$content = $self->_lc_and_unac($content);
-		push(@found, $doc_id) if (index($content, $phrase) != -1);
-		print "content scan for $doc_id, phrase = $phrase\n"
-		    if $PA > 1;
-	    } else {
-		push(@found, $doc_id);
-	    }
-	}
-
-	return \@found;
+    return \@found;
 }
 
 sub _phrase_proximity {
@@ -1293,7 +1322,7 @@ sub _fetch_maxtf {
     if ($use_all_fields) {
 	$fnos = join ',', (0 .. $#{$self->{DOC_FIELDS}});
     } else {
-	$fnos = join ',', @{$self->{QUERY_FIELD_NOS}};
+	$fnos = join ',', @{$self->{TERM_FIELD_NOS}};
     }
     
     my $sql = $self->db_fetch_maxtf($fnos);
@@ -1318,7 +1347,7 @@ sub _fetch_docweights {
 	@fnos = (0 .. $#{$self->{DOC_FIELDS}});
     } else {
 	# skip over if we already have hash entry
-	foreach my $fno (@{$self->{QUERY_FIELD_NOS}}) {
+	foreach my $fno (@{$self->{TERM_FIELD_NOS}}) {
 	    unless (ref $self->{W_D}->[$fno]) {
 		push @fnos, $fno;
 	    } 
@@ -1371,15 +1400,17 @@ sub _search_okapi {
     my $result_max = $self->{RESULT_VECTOR}->Max;
     my $result_min = $self->{RESULT_VECTOR}->Min;
 
-    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
+    foreach my $fno ( @{$self->{TERM_FIELD_NOS}} ) {
 	$avg_W_d = $self->{AVG_W_D}->[$fno];
 	foreach my $term (@{$self->{TERMS}->[$fno]}) {
-	    $f_t = $self->{C}->f_t($fno, $term);
+	    $f_t = $self->{F_T}->[$fno]->{$term} ||
+		$self->{C}->f_t($fno, $term);
 	    $idf =  log(($N - $f_t + 0.5) / ($f_t + 0.5));
 	    next if $idf < $IDF_MIN_OKAPI;
 	    $f_qt = $self->{F_QT}->[$fno]->{$term};     # freq of term in query
 	    my $w_qt = (($k3 + 1) * $f_qt) / ($k3 + $f_qt); # query term weight
-	    my $term_docs = $self->{C}->term_docs($fno, $term);
+	    my $term_docs = $self->{TERM_DOCS}->[$fno]->{$term} ||
+		$self->{C}->term_docs($fno, $term);
 	    score_term_docs_okapi($term_docs, \%score, $self->{RESULT_VECTOR}, $ACCUMULATOR_LIMIT, $result_min, $result_max, $idf, $f_t, $self->{W_D}->[$fno], $avg_W_d, $w_qt, $k1, $b);
 	}
     }
@@ -1407,15 +1438,13 @@ sub _search_legacy_tfidf {
     # Special case: only one word in query and word is not very selective,
     # so don't bother tf-idf scoring, just return results sorted by docfreq_tt
     my @and_plus_or_words;
-    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
+    foreach my $fno ( @{$self->{TERM_FIELD_NOS}} ) {
 	push @and_plus_or_words, @{$self->{TERMS}->[$fno]};
     }
 
     my $and_plus_or = $#and_plus_or_words + 1;
     if ($and_plus_or == 1 && $#result_docs > $self->{RESULT_THRESHOLD}) {
-	print "here 2\n";
-
-	my $fno = $self->{QUERY_FIELD_NOS}->[0];
+	my $fno = $self->{TERM_FIELD_NOS}->[0];
 	my $word = $and_plus_or_words[0];
 
 	my $f_t = $self->{C}->f_t($fno, $word);
@@ -1447,7 +1476,7 @@ sub _search_legacy_tfidf {
 
     # Otherwise do tf-idf
     $self->_fetch_maxtf;
-    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
+    foreach my $fno ( @{$self->{TERM_FIELD_NOS}} ) {
       WORD:
 	foreach my $word (@{$self->{TERMS}->[$fno]}) {
 	    my $f_t = $self->{C}->f_t($fno, $word);
@@ -1531,7 +1560,7 @@ sub _optimize_or_search {
 		      || $clause->{MODIFIER} eq 'AND');
 	    if ($clause->{TYPE} eq 'TERM'
 		|| $clause->{TYPE} eq 'PLURAL'
-		|| $clause->{TYPE} eq 'WILDCARD') {
+		|| $clause->{TYPE} eq 'WILD') {
 
 		if ($clause->{MODIFIER} eq 'OR') {
 		    $or_term_count++;
@@ -1566,11 +1595,15 @@ sub _optimize_or_search {
     }
 }
 
-sub _apply_mask {
+sub _resolve_mask {
 
     my $self = shift;
 
     return unless $self->{MASK};
+
+    $self->{RESULT_MASK} = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
+    $self->{RESULT_MASK}->Fill;
+
     if ($self->_fetch_mask) {
 	$self->{VALID_MASK} = 1;
     }
@@ -1578,13 +1611,13 @@ sub _apply_mask {
 	foreach my $mask (@{$self->{MASK}->{and_mask}}) {
 	    unless (ref $mask) {
 		next unless ref $self->{MASK_VECTOR}->{$mask};
-		$self->{RESULT_VECTOR}->Intersection(
-		    $self->{RESULT_VECTOR}, $self->{MASK_VECTOR}->{$mask});
+		$self->{RESULT_MASK}->Intersection(
+		    $self->{RESULT_MASK}, $self->{MASK_VECTOR}->{$mask});
 	    } else {
 		my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
 		$vector->Index_List_Store(@$mask);
-		$self->{RESULT_VECTOR}->Intersection(
-		    $self->{RESULT_VECTOR}, $vector);
+		$self->{RESULT_MASK}->Intersection(
+		    $self->{RESULT_MASK}, $vector);
 	    }
 	}
     }
@@ -1593,14 +1626,14 @@ sub _apply_mask {
 	    unless (ref $mask) {
 		next unless ref $self->{MASK_VECTOR}->{$mask};
 		$self->{MASK_VECTOR}->{$mask}->Flip;
-		$self->{RESULT_VECTOR}->Intersection(
-		    $self->{RESULT_VECTOR}, $self->{MASK_VECTOR}->{$mask});
+		$self->{RESULT_MASK}->Intersection(
+		    $self->{RESULT_MASK}, $self->{MASK_VECTOR}->{$mask});
 	    } else {
 		my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
 		$vector->Index_List_Store(@$mask);
 		$vector->Flip;
-		$self->{RESULT_VECTOR}->Intersection(
-		    $self->{RESULT_VECTOR}, $vector);
+		$self->{RESULT_MASK}->Intersection(
+		    $self->{RESULT_MASK}, $vector);
 	    }
 	}
     }
@@ -1626,8 +1659,8 @@ sub _apply_mask {
 		}
 	    }
 	    if ($or_mask_count) {
-		$self->{RESULT_VECTOR}->Intersection(
-		    $self->{RESULT_VECTOR}, $union_vector);
+		$self->{RESULT_MASK}->Intersection(
+		    $self->{RESULT_MASK}, $union_vector);
 	    }
 	}
     }
@@ -2099,15 +2132,15 @@ bigger documents.  Takes up a lot of space and slows down the indexing
 process.  Proximity based matching is activated by a query containing
 a phrase in form of:
 
-	":2 some phrase" => matches "some nice phrase"
-	":1 some phrase" => matches only exact "some phrase"
-	":10 some phrase" => matches "some [1..9 words] phrase"
+	"some phrase"~2 => matches "some nice phrase"
+	"some phrase"~1 => matches only exact "some phrase"
+	"some phrase"~10 => matches "some [1..9 words] phrase"
 
-	Defaults to ":1" when omitted.
+	Defaults to ~1 when omitted.
 
 The proximity matches work only forwards, not backwards, that means:
 
-  	":3 some phrase" does not match "phrase nice some" or "phrase some"
+  	"some phrase"~3 does not match "phrase nice some" or "phrase some"
 
 =item db
 

@@ -2,6 +2,27 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.20
+    Added inline fielded queries, e.g.:
+    $index->search( field1 => 'field2:this field3:"that phrase" foo bar' );
+    In previous version, this search could only be represented like this:
+    $index->search( field1 => 'foo bar',
+                    field2 => 'this',
+                    field3 => '"that phrase"');
+
+    The advantage of the new syntax is that fields can be combined in
+    arbitary boolean expressions, where previously only the union of the
+    fields was returned.  For example:
+
+    (field1:this OR field2:that) AND (field3:"foo bar" OR field1:foo)   
+
+    Wild and plural search bug fixes    
+
+    Turned proximity search back on, changed syntax. For example, to
+    find "foo" followed by "bar" with 0, 1 or 2 words between:
+        "foo bar"~3 
+
+
 0.19
     Rewrote query parser.  Now we support nested subqueries in parentheses,
     AND/OR/NOT operators, and existing '+/-' operators
@@ -240,6 +261,9 @@ Revision history for Perl extension DBIx::TextIndex.
       - the proximity matches work only forwards, not backwards,
         that means:
         ":3 some phrase" does not match "phrase nice some" or "phrase some"
+
+        NOTE: as of version 0.20, this syntax has changed:
+        "some phrase"~3
 
     rewrote the word splitter and query parser
       - added support for czech language diacritics insensitive indexing
