@@ -1,22 +1,208 @@
 Revision history for Perl extension DBIx::TextIndex.
+
+=head1 CHANGES
+
+0.07 UPGRADE WARNING: collection table format changed, use new method
+    $index->upgrade_collection_table() to recreate collection table. 
+    Calling initialize() method for a new collection will also upgrade
+    collection table. Index backup recommended.
+
+    Added error_ prefix to error message column names in collection table
+
+    Added version column to collection table
+
+    Added language column to collection table, removed czech_language column
+
+    UPGRADE WARNING: instead of new({ czech_language => 1}), use
+    new({ language => 'cz' })
+
+    Bug fix: _store_collection_info() error if stop lists are not used
+
+    unscored_search() will now return a scalar error message
+    if an error occurs in search
+
+    search() will croak if passed an invalid field name to search on
+
+    Added documentation for mask operations
+
+0.06 
+
+  tripie's patch v2 updates:
+
+    - a bug in document removing proccess related to incorrect
+    'occurency' data updates when multi-field documents were removed,
+    was fixed.  The methods remove_document() and _inverted_remove()
+    were affected.
+
+    - a bug related to wildcards in queries in form of "+word +next%"
+    or "+word% +next%" was fixed
+
+    - a bug related to "%" wildcards used while searching of
+    multi-field documents was fixed
+
+    - a bug related to stoplists and phrases that contain a
+    non-stoplisted word together with a stoplisted word was fixed
+
+    - a new full-featured solution of highligting of query words or
+    patterns in content of resulting documents was added
+
+    I've written a new module HTML::Highlight, that can be used
+    either independently or together with DBIx::TextIndex. Its
+    advantages include:
+
+      - it makes highlighting very easy
+      - takes phrases and wildcards into account
+      - supports diacritics insensitive highlighting for iso-8859-2
+        languages
+      - takes HTML tags into account. That means when a user searches
+        for for example 'font', than a FONT element in <FONT COLOR="red">
+        does not get "highlighted".
+		
+    The module provides a very nice Google-like highlighting using
+    different colors for different words or phrases.
+
+    The module works together with DBIx::TextIndex using its new method
+    html_highlight().
+
+    The module can also be used to preview a context in which query
+    words appear in resulting documents.
+		
+    - the old method highlight() was not changed nor removed for sake of
+    compatibility with old code
+	
+    - I put a new 'html_search.cgi' script to examples/ to show how the new
+    highligting and context previewing works.
+	  
+    - the HTML::Highlight module can be found on CPAN - 
+    http://www.cpan.org/authors/id/T/TR/TRIPIE/
+
+    - the new highlighting solution has been documented in a new section
+    of the documentation
+	  
+  tripie v1 changes:
+
+    added proximity indexing
+      - based on positions of words in a document
+      - by default it is disabled, activate it by new option "proximity_index"
+      - very efficient for bigger documents, much worse for small ones
+      - it's very big (approx. 20 bytes for each word)
+      - allows fast proximity based searches in form of:
+        ":2 some phrase" => matches "some nice phrase"
+        ":1 some phrase" => matches only exact "some phrase"
+        ":10 some phrase" => matches "some [1..9 words] phrase"
+        defaults to ":1" when omitted
+      - the proximity matches work only forwards, not backwards,
+        that means:
+        ":3 some phrase" does not match "phrase nice some" or "phrase some"
+
+    rewrote the word splitter and query parser
+      - added support for czech language diacritics insensitive indexing
+        and searching (option "czech_language")
+	(note: changed option to "language", pass value "cz" to enable -dkoch)
+        that is implemented by converting both the indexed data and
+	the query from iso-8859-2 to ASCII
+
+      - this can also be used for other iso-8859-2 based Slavic languages
+
+      - the above is performed by my module "CzFast" that can
+        be found on CPAN (my CPAN id is "TRIPIE"), and is optional
+
+    added partial pattern matching using wildcards "%" or "*"
+      - these wildcards can be used at end of a word to match all words
+        that begin with that word, ie.
+
+        the "%" character means "match any characters"
+
+        car%	==> matches "car", "cars", "careful", "cartel", ....
+
+        the "*" character means "match also the plural form"
+
+        car*	==> matches only "car" or "cars"
+
+      - added option "min_wildcard_length" to specify minimal length of a
+        word base appearing before the "%" wildcard character to avoid
+        selection of excessive amount of results
+
+    added a database abstraction layer - all SQL queries were moved to
+    separate module (see lib/ and the docs for new "db" option) and
+    polished a bit for better maintainability and possible support of
+    other SQL dialects
+
+    added stoplists
+      - some words that are too common (are present in almost every document)
+	are not indexed and are removed from the search query before processing
+	to avoid expensive processing of excessively huge result sets
+      - user is notified when a search does not produce any results because
+	some words he used in his query were stoplisted (no_results_stop)
+      - stoplists can be easily localized or modified 
+      - default is not to use any stoplist, one or more stoplists 
+	can be selected using the "stoplist" option
+      - stoplist data files are in lib/
+      - english (en) and czech (cz) stoplists are included
+      - more than one stoplist can be used
+
+    added a facility to remove documents from the index - 
+      check the documentation for new method "remove_document" for more info.
+	
+      There is no way to recover all the space taken by the documents that are
+      being removed. This method manages to recover approx. 80% of the space.
+	
+      It's recommended to rebuild the index when you remove a
+      significant amount of documents.
+
+    added a facility to obtain some statistical information about the index -
+      check the documentation for new method "stat"
+
+    max_word_length, phrase_threshold and result_threshold are now configurable
+    options
+
+    added configuration options to customize/localize the error messages
+    (no_results etc.)
+
+    all new configuration options are properly stored in collection's data
+
+    max_word_length limit now works much better - all words are stripped
+    down to the maximum size before they are stored to the index,
+    and also all query words are stripped down to the maximum word
+    size before they are proccessed. Now when the max word length
+    is set to, say, six and a user searches for for example
+    "consciousness", all documents containing any words beginning
+    with "consci" are returned Therefore the new max_word_length
+    option is not a limit of a word size, but rather a
+    "resolution" preference.  added some comments and occasionally
+    corrected indentation
+
+    documented the enhancements
+
+    bugfix: when RaiseError was set on a DBI connection, then one
+    query which only switched off PrintError to avoid some problems, failed
+
+    note: the interface was not changed - old code using this module should
+    run without any changes
+
+    Thanks for this excellent module and please excuse my inferior English !
+
+    Tomas Styblo, tripie@cpan.org
+
 0.05 Added unscored_search() which returns a reference to an array of
-     document_ids, without scores.  Should be much faster than scored search.
+document_ids, without scores.  Should be much faster than scored search.
 
-     Added error handling in case _occurence() doesn't return a number.
+    Added error handling in case _occurence() doesn't return a number.
 
-0.04 Bug fix: add_document() will return if passed empty array ref
-     instead of producing error.
+0.04 Bug fix: add_document() will return if passed empty array ref instead
+of producing error.
 
-     Changed _boolean_compare() and _phrase_search() so and_words and
-     phrases behave better in multiple-field searches. Result set for each
-     field is calculated first, then union of all fields is taken for
-     final result set.
+    Changed _boolean_compare() and _phrase_search() so and_words and
+phrases behave better in multiple-field searches. Result set for each
+field is calculated first, then union of all fields is taken for
+final result set.
 
-     Scores are scaled lower in _search().
+    Scores are scaled lower in _search().
 
 0.03 Added example scripts in examples/.
 
 0.02 Added or_mask_set.
 
-0.01 Initial public release. Should be considered beta, and methods may
-     be added or changed until the first stable release.
+0.01 Initial public release.  Should be considered beta, and methods may be
+added or changed until the first stable release.
+

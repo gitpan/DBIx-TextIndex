@@ -3,10 +3,15 @@ MANIFEST
 Makefile.PL
 README
 TextIndex.pm
-test.pl
+t/load.t
 examples/README
 examples/encantadas.txt
 examples/index.pl
 examples/load_sample.pl
 examples/search.cgi
+examples/html_search.cgi
 examples/search.pl
+examples/remove.pl
+lib/DBIx/TextIndex/mysql.pm
+lib/DBIx/TextIndex/stop-en.pm
+lib/DBIx/TextIndex/stop-cz.pm
