@@ -1,6 +1,6 @@
 FILE DESCRIPTONS
 
-encantadas.txt: The Encantadas, by Herman Melville.  From http://www.melville.org/.
+../testdata/encantadas.txt: The Encantadas, by Herman Melville.  From http://www.melville.org/.
 
 load_sample.pl: Breaks the above file into separate paragraphs, and loads each paragraph as a row in the database 'test', tablename 'textindex_doc'.  Run this first.
 

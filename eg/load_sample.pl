@@ -4,7 +4,7 @@ use strict;
 
 use DBI;
 
-my $FILENAME = 'encantadas.txt';
+my $FILENAME = '../testdata/encantadas.txt';
 my $DB = 'DBI:mysql:test';
 my $DBAUTH = ':';
 

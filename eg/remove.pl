@@ -11,13 +11,13 @@ my $DB = 'DBI:mysql:test';
 
 my $DBAUTH = ':';
 
-my $document_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
+my $doc_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
 my $index_dbh = DBI->connect($DB, split(':', $DBAUTH, 2),
 	{	ShowErrorStatement => 1 }
 ) or die $DBI::errstr;
 
 my $index = DBIx::TextIndex->new({
-    document_dbh => $document_dbh,
+    doc_dbh => $doc_dbh,
     index_dbh => $index_dbh,
     collection => 'encantadas',
     print_activity => 0
@@ -29,8 +29,8 @@ print "Enter document ids to remove, separate with a comma: ";
 my $docs = <STDIN>;
 chomp $docs;
 my @docs = split(/,\s*/, $docs);
-my $removed = $index->remove_document(\@docs);
+my $removed = $index->remove_doc(\@docs);
 print "Total $removed words were removed.\n";
 
 $index_dbh->disconnect;
-$document_dbh->disconnect;
+$doc_dbh->disconnect;

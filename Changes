@@ -2,6 +2,47 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.12
+    Added _optimize_or_search(). If query contains just OR words,
+    turn the rarest words into AND words to reduce result set size
+    before scoring.  Practically, this makes queries behave more like
+    "all of the words" instead of "any of the words," which seems to
+    be what the average user expects.
+
+    Changed all symbols 'occurence' to 'freq_d' (frequency of docs in
+    entire collection that contain term)
+
+    Multi-field queries will return the intersection of all fields
+    instead of the union.
+
+    Added method all_doc_ids().
+
+    There is no longer any need to sort doc_ids before passing
+    to add_doc().
+
+    Added more tests. WARNING: MySQL database 'test' must be available
+    on localhost for tests to succeed.
+
+    UPGRADE WARNING: collection table format changed, new index table
+    collection_all_docs_vector added, some field names have changed in
+    inverted tables.  Any indexes created with 0.11 or earlier will have
+    to be deleted and recreated.
+
+    UPGRADE WARNING: all symbols with "document" have been renamed to
+    "doc" for brevity.  Methods have also been renamed, e.g. add_document()
+    is now add_doc().  The old method names will work, but are deprecated.
+
+    Replaced option 'language' with 'charset'.  iso-8859-1 is the
+    default charset.
+
+    Added call to Text::Unaccent::unac_string (www.senga.org) to replace
+    accented characters with plain ASCII equivalent.  Uses 'charset' option
+    to determine mapping.
+   
+    UPGRADE WARNING: added structured exceptions using Exception::Class.
+    Calls to search() now have to be wrapped with eval blocks to catch
+    query exceptions.
+
 0.11
 
     Bug fix: HTML tags are now changed to a single space, instead of
@@ -125,7 +166,8 @@ Revision history for Perl extension DBIx::TextIndex.
     rewrote the word splitter and query parser
       - added support for czech language diacritics insensitive indexing
         and searching (option "czech_language")
-	(note: changed option to "language", pass value "cz" to enable -dkoch)
+	(note: changed option to "charset", pass value "iso-8859-2"
+	to enable -dkoch)
         that is implemented by converting both the indexed data and
 	the query from iso-8859-2 to ASCII
 
@@ -214,7 +256,7 @@ Revision history for Perl extension DBIx::TextIndex.
 0.05
 
     Added unscored_search() which returns a reference to an array of
-document_ids, without scores.  Should be much faster than scored search.
+doc_ids, without scores.  Should be much faster than scored search.
 
     Added error handling in case _occurence() doesn't return a number.
 

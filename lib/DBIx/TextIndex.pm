@@ -5,13 +5,34 @@ use strict;
 use Bit::Vector ();
 use Carp qw(carp croak);
 use HTML::Entities ();
+use Text::Unaccent qw(unac_string);
 
-my $ME = "DBIx::TextIndex";
+use Exception::Class (
+  'DBIx::TextIndex::Exception',
 
-$DBIx::TextIndex::VERSION = '0.11';
+  'DBIx::TextIndex::Exception::DataAccess' =>
+  { isa => 'DBIx::TextIndex::Exception',
+    fields => [ 'syserr' ] },
+
+  'DBIx::TextIndex::Exception::General' =>
+  { isa => 'DBIx::TextIndex::Exception',
+    fields => [ 'syserr' ] },
+
+  'DBIx::TextIndex::Exception::Query' =>
+  { isa => 'DBIx::TextIndex::Exception',
+    fields => [ 'syserr' ] },
+);
+
+my $GEN = 'DBIx::TextIndex::Exception::General';
+my $DA  = 'DBIx::TextIndex::Exception::DataAccess';
+my $QRY = 'DBIx::TextIndex::Exception::Query';
+
+my $ME  = 'DBIx::TextIndex"';
+
+$DBIx::TextIndex::VERSION = '0.12';
 
 # Version number when collection table definition last changed
-my $LAST_COLLECTION_TABLE_UPGRADE = '0.10';
+my $LAST_COLLECTION_TABLE_UPGRADE = '0.12';
 
 # Largest size word to be indexed
 my $MAX_WORD_LENGTH = 20;
@@ -42,16 +63,16 @@ my @MASK_TYPE = qw(and_mask or_mask not_mask);
 
 my $DB_DEFAULT = 'mysql';
 
-my $LANGUAGE_DEFAULT = 'en';
+my $CHARSET_DEFAULT = 'iso-8859-1';
 
 my @COLLECTION_FIELDS = qw(
     collection
     version
     max_indexed_id
-    document_table
-    document_id_field
-    document_fields
-    language
+    doc_table
+    doc_id_field
+    doc_fields
+    charset
     stoplist
     proximity_index
     error_quote_count
@@ -69,10 +90,10 @@ my %COLLECTION_FIELD_DEFAULT = (
     collection => '',
     version => $DBIx::TextIndex::VERSION,
     max_indexed_id => '0',
-    document_table => '',
-    document_id_field => '',
-    document_fields => '',
-    language => $LANGUAGE_DEFAULT,
+    doc_table => '',
+    doc_id_field => '',
+    doc_fields => '',
+    charset => $CHARSET_DEFAULT,
     stoplist => '',
     proximity_index => '0',
     error_quote_count => $ERROR{quote_count},
@@ -99,12 +120,11 @@ sub new {
     $self->{COLLECTION_TABLE} = $COLLECTION_TABLE;
     $self->{COLLECTION_FIELDS} = \@COLLECTION_FIELDS;
 
-    foreach my $arg ('collection', 'index_dbh', 'document_dbh') {
+    foreach my $arg ('collection', 'index_dbh', 'doc_dbh') {
 	if ($args->{$arg}) {
 	    $self->{uc $arg} = $args->{$arg};
-	}
-	else {
-	    croak "new $pkg needs $arg argument";
+	} else {
+	    throw $GEN( error => "new $pkg needs $arg argument" );
 	}
     }
 
@@ -117,10 +137,10 @@ sub new {
     require "$db";
 
     unless ($self->_fetch_collection_info) {
-	$self->{DOCUMENT_TABLE} = $args->{document_table};
-	$self->{DOCUMENT_FIELDS} = $args->{document_fields};
-	$self->{DOCUMENT_ID_FIELD} = $args->{document_id_field};
-	$self->{LANGUAGE} = $args->{language} || $LANGUAGE_DEFAULT;
+	$self->{DOC_TABLE} = $args->{doc_table};
+	$self->{DOC_FIELDS} = $args->{doc_fields};
+	$self->{DOC_ID_FIELD} = $args->{doc_id_field};
+	$self->{CHARSET} = $args->{charset} || $CHARSET_DEFAULT;
     	$self->{STOPLIST} = $args->{stoplist};
     	$self->{PINDEX} = $args->{proximity_index} || 0;
 	# overiding default error messages
@@ -138,19 +158,20 @@ sub new {
 	$self->{DECODE_HTML_ENTITIES} = $args->{decode_html_entities}
 	    || 1;
     }
-    $self->{CZECH_LANGUAGE} = $self->{LANGUAGE} eq 'cz' ? 1 : 0;
+    $self->{CZECH_LANGUAGE} = $self->{CHARSET} eq 'iso-8859-2' ? 1 : 0;
     $self->{MAXTF_TABLE} = $self->{COLLECTION} . '_maxtf';
     $self->{MASK_TABLE} = $self->{COLLECTION} . '_mask';
+    $self->{ALL_DOCS_VECTOR_TABLE} = $self->{COLLECTION} . "_all_docs_vector";
 
     my $field_no = 0;
-    foreach my $field ( @{$self->{DOCUMENT_FIELDS}} ) {
+    foreach my $field ( @{$self->{DOC_FIELDS}} ) {
 	$self->{FIELD_NO}->{$field} = $field_no;
 	push @{$self->{INVERTED_TABLES}},
 	    ($self->{COLLECTION} . '_' . $field . '_inverted');
 	if ($self->{PINDEX}) {
 	    push @{$self->{PINDEX_TABLES}},
 		($self->{COLLECTION} . '_' . $field . '_pindex');
-	}	
+	}
     	$field_no++;
     }
 
@@ -167,9 +188,6 @@ sub new {
         }
         $self->{STOPLISTED_QUERY} = [];
     }
-    
-    # Initialize Czech language support
-    require CzFast if $self->{CZECH_LANGUAGE};
 
     return $self;
 }
@@ -184,8 +202,7 @@ sub add_mask {
 
     # Trim ids from end instead here.
     if ($ids->[-1] > $max_indexed_id) {
-	carp "Greatest document_id in mask ($mask) is larger than greatest document_id in index";
-	return 0;
+	throw $GEN( error => "Greatest doc_id in mask ($mask) is larger than greatest doc_id in index" );
     }
 
     my $vector = Bit::Vector->new($max_indexed_id + 1);
@@ -203,31 +220,44 @@ sub delete_mask {
     $self->{INDEX_DBH}->do($self->db_delete_mask, undef, $mask);
 }
 
-sub add_document {
-    my $self = shift;
-    my $ids = shift;
-    return if $#$ids < 0;
+# Stub method for older deprecated name
+sub add_document { shift->add_doc(@_) }
 
-    if ($PA) {
-	my $add_count = $#{$ids} + 1;
-	print "Adding $add_count documents\n";
+sub add_doc {
+    my $self = shift;
+    my @ids = @_;
+
+    my $ids;
+    if (ref $ids[0] eq 'ARRAY') {
+	$ids = $ids[0];
+    } elsif ($ids[0] =~ m/^\d+$/) {
+	$ids = \@ids;
     }
 
+    return if $#$ids < 0;
+
+    my $add_count = $#$ids + 1;
+    if ($PA) {
+	print "Adding $add_count docs\n";
+    }
+
+    my @sort_ids = sort { $a <=> $b } @$ids;
+
     $self->{OLD_MAX_INDEXED_ID} = $self->max_indexed_id;
-    $self->max_indexed_id($ids->[-1]);
-    foreach my $document_id (@$ids) {
-	print $document_id if $PA;
-	next unless $self->_ping_document($document_id);
+    $self->max_indexed_id($sort_ids[-1]);
+    foreach my $doc_id (@sort_ids) {
+	print $doc_id if $PA;
+	next unless $self->_ping_doc($doc_id);
 	
-	foreach my $field_no ( 0 .. $#{$self->{DOCUMENT_FIELDS}} ) {
+	foreach my $field_no ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	    print " field$field_no" if $PA;
 
 	    my %frequency;
 	    my $maxtf = 0;
 	    my $word_count = 0;
             my $table = $self->{PINDEX_TABLES}->[$field_no];
-	    my @words = $self->_words($self->_fetch_document($document_id,
-				      $self->{DOCUMENT_FIELDS}->[$field_no]));
+	    my @words = $self->_words($self->_fetch_doc($doc_id,
+				      $self->{DOC_FIELDS}->[$field_no]));
 
 	    foreach my $word (@words) {
 		$frequency{$word}++;
@@ -235,8 +265,8 @@ sub add_document {
                 if ($self->{PINDEX}) {
 		    my $sql = $self->db_pindex_add($table);
 		    $self->{INDEX_DBH}->do($sql, undef,
-					   $word, $document_id, $word_count);
-		    print "pindex: adding $document_id, word: $word, pos: $word_count\n"
+					   $word, $doc_id, $word_count);
+		    print "pindex: adding $doc_id, word: $word, pos: $word_count\n"
 			if $PA > 1;
 		}
 		$word_count++;
@@ -244,37 +274,53 @@ sub add_document {
 	    print " $word_count" if $PA;
 	    
 	    while (my ($word, $frequency) = each %frequency) {
-		$self->_documents($field_no, $word, $document_id, $frequency);
+		$self->_docs($field_no, $word, $doc_id, $frequency);
 	    }
-	    $self->{NEW_MAXTF}->[$field_no]->[$document_id] = $maxtf;
+	    $self->{NEW_MAXTF}->[$field_no]->[$doc_id] = $maxtf;
 	}	# end of field indexing
 
 	print "\n" if $PA;
-    }	# end of document indexing
+    }	# end of doc indexing
 
-    $self->_commit_documents;
+    $self->all_doc_ids(@sort_ids);
+
+    $self->_commit_docs;
+
+    return $add_count;
+
 }
 
-sub remove_document {
+# Stub method for older deprecated name
+sub remove_document { shift->remove_doc(@_) }
+
+sub remove_doc {
     my $self = shift;
-    my $ids = shift;
+    my @ids = @_;
+
+    my $ids;
+    if (ref $ids[0] eq 'ARRAY') {
+	$ids = $ids[0];
+    } elsif ($ids[0] =~ m/^\d+$/) {
+	$ids = \@ids;
+    }
+
     return if $#$ids < 0;
 
     if ($PA) {
 	my $remove_count = $#{$ids} + 1;
-	print "Removing $remove_count documents\n";
+	print "Removing $remove_count docs\n";
     }
 
     my $total_words = 0;
     my @remove_words;
-    foreach my $document_id (@$ids) {
-	print $document_id if $PA;
-	croak "$ME: document's content must be accessible to remove a document"
-	    unless $self->_ping_document($document_id);
-	foreach my $field_no ( 0 .. $#{$self->{DOCUMENT_FIELDS}} ) {
+    foreach my $doc_id (@$ids) {
+	print $doc_id if $PA;
+	croak "$ME: doc's content must be accessible to remove a doc"
+	    unless $self->_ping_doc($doc_id);
+	foreach my $field_no ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	    print " field$field_no" if $PA;
-	    my @words = $self->_words($self->_fetch_document($document_id,
-				      $self->{DOCUMENT_FIELDS}->[$field_no]));
+	    my @words = $self->_words($self->_fetch_doc($doc_id,
+				      $self->{DOC_FIELDS}->[$field_no]));
 	    my %words;
 	    foreach my $word (@words) {
 		$remove_words[$field_no]->{$word}++ if (not $words{$word});
@@ -282,47 +328,49 @@ sub remove_document {
 		$total_words++;
 	    }
 	}	# end of each field
-    }	# end of each document
+    }	# end of each doc
 
     if ($self->{PINDEX}) {
-	print "Removing documents from proximity index\n" if $PA;
+	print "Removing docs from proximity index\n" if $PA;
 	$self->_pindex_remove($ids);
     }
 
-    print "Removing documents from max term frequency table\n" if $PA;
+    print "Removing docs from max term frequency table\n" if $PA;
     $self->_maxtf_remove($ids);
 
-    print "Removing documents from inverted tables\n" if $PA;
+    print "Removing docs from inverted tables\n" if $PA;
     $self->_inverted_remove($ids, \@remove_words);
+
+    $self->_all_doc_ids_remove($ids);
 
     return $total_words; 	# return count of removed words
 }
 
 sub _pindex_remove {
     my $self = shift;
-    my $documents_ref = shift;
+    my $docs_ref = shift;
 
-    my $documents = join(', ', @{$documents_ref});
+    my $docs = join(', ', @{$docs_ref});
     foreach my $table (@{$self->{PINDEX_TABLES}}) {
-	my $sql = $self->db_pindex_remove($table, $documents);
-        print "pindex_remove: removing documents: $documents\n" if $PA;
+	my $sql = $self->db_pindex_remove($table, $docs);
+        print "pindex_remove: removing docs: $docs\n" if $PA;
         $self->{INDEX_DBH}->do($sql);
     }
 }
 
 sub _maxtf_remove {
     my $self = shift;
-    my $documents_ref = shift;
+    my $docs_ref = shift;
     
-    my @documents = @{$documents_ref};
+    my @docs = @{$docs_ref};
     my $use_all_fields = 1;
     $self->_fetch_maxtf($use_all_fields);
     
     my $sql = $self->db_update_maxtf;
     my $sth = $self->{INDEX_DBH}->prepare($sql);
-    foreach my $field_no ( 0 .. $#{$self->{DOCUMENT_FIELDS}} ) {
+    foreach my $field_no ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	my @maxtf = @{$self->{MAXTF}->[$field_no]};
-	foreach my $doc_id (@documents) {
+	foreach my $doc_id (@docs) {
 	    $maxtf[$doc_id] = 0;
 	}
 	my $packed_maxtf = pack 'w' x ($#maxtf + 1), @maxtf;
@@ -332,12 +380,12 @@ sub _maxtf_remove {
 
 sub _inverted_remove {
     my $self = shift;
-    my $documents_ref = shift;
+    my $docs_ref = shift;
     my $words = shift;
 	
-    my @documents = @{$documents_ref};
-    foreach my $fno (0..$#{$self->{DOCUMENT_FIELDS}}) {
-	my $field = $self->{DOCUMENT_FIELDS}->[$fno];
+    my @docs = @{$docs_ref};
+    foreach my $fno (0..$#{$self->{DOC_FIELDS}}) {
+	my $field = $self->{DOC_FIELDS}->[$fno];
 	my $table = $self->{INVERTED_TABLES}->[$fno];
 	my $sql;
 	
@@ -349,21 +397,21 @@ sub _inverted_remove {
 	
 	foreach my $word (keys %{$words->[$fno]}) {
             $sth_select->execute($word);
-	    my($o_occurence, $o_documents_vector, $o_documents);
-	    $sth_select->bind_columns(\$o_occurence, \$o_documents_vector,
-				      \$o_documents);
+	    my($o_freq_d, $o_docs_vector, $o_docs);
+	    $sth_select->bind_columns(\$o_freq_d, \$o_docs_vector,
+				      \$o_docs);
 	    $sth_select->fetch;
 	    
 	    print "inverted_remove: field: $field: word: $word\n" if $PA;
-	    # @documents_all contains a document id for each word that
+	    # @docs_all contains a doc id for each word that
 	    # we are removing
-	    my $occurence = $o_occurence - $words->[$fno]->{$word};
-	    print "inverted_remove: old occurence: $o_occurence\n" if $PA;
-	    print "inverted_remove: new occurence: $occurence\n" if $PA;
+	    my $freq_d = $o_freq_d - $words->[$fno]->{$word};
+	    print "inverted_remove: old freq_d: $o_freq_d\n" if $PA;
+	    print "inverted_remove: new freq_d: $freq_d\n" if $PA;
 	    
-	    # if new occurence is zero, then we should remove the record
+	    # if new freq_d is zero, then we should remove the record
             # of this word completely
-	    if ($occurence < 1) {
+	    if ($freq_d < 1) {
 		my $sql = $self->db_inverted_remove($table);
                 $self->{INDEX_DBH}->do($sql, undef, $word);
                 print qq(inverted_remove: removing "$word" completely\n)
@@ -371,38 +419,38 @@ sub _inverted_remove {
             	next;
             }
 
-	    # now comes the BIG PROBLEM - we cannot modify the documents
+	    # now comes the BIG PROBLEM - we cannot modify the docs
 	    # vector by shrinking it only in rows that correspond to
-	    # words found in that document, because that would break
+	    # words found in that doc, because that would break
 	    # the matching process
 	    #
 	    # obviously we also cannot loop over all those thousands
 	    # of rows
 	    #
 	    # so we just set to zero all the bits that correspond to words
-	    # found in this document
-	    
+	    # found in this doc
+
 	    my $vec = Bit::Vector->new_Enum($self->max_indexed_id + 1,
-					    $o_documents_vector);
-	    $vec->Index_List_Remove(@documents);
+					    $o_docs_vector);
+	    $vec->Index_List_Remove(@docs);
 	    if ($PA) {
 		local $, = ',';
-                print "inverted_remove: removing documents: ";
-                print @documents;
+                print "inverted_remove: removing docs: ";
+                print @docs;
                 print "\n";
             }
-	    # now we will remove the document from the "documents" field
-	    my %new_documents = unpack 'w*', $o_documents;
-	    foreach my $doc_id (@documents) {
-		delete $new_documents{$doc_id};
+	    # now we will remove the doc from the "docs" field
+	    my %new_docs = unpack 'w*', $o_docs;
+	    foreach my $doc_id (@docs) {
+		delete $new_docs{$doc_id};
 	    }
-	    my $new_documents;
-	    while ( my($document, $frequency) = each %new_documents) {
-		$new_documents .= pack 'ww', ( $document, $frequency );
+	    my $new_docs;
+	    while ( my($doc, $frequency) = each %new_docs) {
+		$new_docs .= pack 'ww', ( $doc, $frequency );
 	    }
-	    
-	    $sth_replace->execute($word, $occurence, $vec->to_Enum,
-				  $new_documents);
+
+	    $sth_replace->execute($word, $freq_d, $vec->to_Enum,
+				  $new_docs);
 	}
     }
 }
@@ -437,11 +485,14 @@ sub search {
     my $query = shift;
     my $args = shift;
 
-    return $ERROR{empty_query} unless $query;
+    $self->{OR_WORD_COUNT} = 0;
+    $self->{AND_WORD_COUNT} = 0;
+
+    throw $QRY( error => $ERROR{empty_query}) unless $query;
 
     my @field_nos;
     foreach my $field (keys %$query) {
-	croak "$ME: invalid field ($field) in search()"
+	throw $GEN( error => "invalid field ($field) in search()" )
 	    unless exists $self->{FIELD_NO}->{$field};
 	push @field_nos, $self->{FIELD_NO}->{$field};
     }
@@ -452,9 +503,7 @@ sub search {
 	$self->{QUERY}->[$self->{FIELD_NO}->{$field}] = $query->{$field};
     }
 
-    if (my $error = $self->_parse_query) {
-	return $error;
-    }
+    $self->_parse_query_fields;
 
     foreach my $mask_type (@MASK_TYPE) {
 	if ($args->{$mask_type}) {
@@ -482,15 +531,16 @@ sub search {
 	}
     }
 
-    $self->_vector_search;
+    $self->_fetch_vectors;
+    $self->_optimize_or_search;
     $self->_boolean_compare;
     $self->_apply_mask;
     $self->_phrase_search;
 
     if ($args->{unscored_search}) {
-	my @result_documents = $self->{RESULT_VECTOR}->Index_List_Read;
-	return $ERROR{'no_results'} if $#result_documents < 0;
-	return \@result_documents;
+	my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
+	throw $QRY( error => $ERROR{'no_results'} ) if $#result_docs < 0;
+	return \@result_docs;
     }
 
     my $results = $self->_search;
@@ -504,7 +554,7 @@ sub highlight {
 sub html_highlight {
     my $self = shift;
     my $field = shift;
-    
+
     my $fno = $self->{FIELD_NO}->{$field};
 
     my @words = @{$self->{QUERY_HIGHLIGHT}->[$fno]};
@@ -530,6 +580,8 @@ sub initialize {
     $self->_create_tables;
     $self->_delete_collection_info;
     $self->_store_collection_info;
+
+    return $self;
 }
 
 sub max_indexed_id {
@@ -557,6 +609,9 @@ sub delete {
     
     print "Dropping max term frequency table ($self->{MAXTF_TABLE})\n" if $PA;
     $self->db_drop_table($self->{MAXTF_TABLE});
+
+    print "Dropping docs vector table ($self->{MAXTF_TABLE})\n" if $PA;
+    $self->db_drop_table($self->{ALL_DOCS_VECTOR_TABLE});
 
     foreach my $table ( @{$self->{INVERTED_TABLES}} ) {
 	print "Dropping inverted table ($table)\n" if $PA;
@@ -598,11 +653,9 @@ sub _collection_table_upgrade_required {
     print "Checking if collection table upgrade required ...\n" if $PA > 1;
     unless ($self->collection_count) {
 	print "... Collection table contains no rows\n" if $PA > 1;
-	return 0;	
+	return 0;
     }
     eval {
-	local $SIG{__DIE__};
-	local $SIG{__WARN__} = sub { die $_[0] };
 	$version = $self->{INDEX_DBH}->selectrow_array(
 			                 $self->db_fetch_collection_version);
 	die $DBI::errstr if $DBI::errstr;
@@ -649,10 +702,27 @@ sub upgrade_collection_table {
 		$old_row->{$field} : $COLLECTION_FIELD_DEFAULT{$field};
 	    $new_row{version} = $COLLECTION_FIELD_DEFAULT{version};
 	}
-	# 'czech_language' option replaced with generic 'language'
+	# 'czech_language', 'language' options replaced with 'charset'
 	if (exists $old_row->{czech_language}) {
-	    $new_row{language} = 'cz' if $old_row->{czech_language};
+	    $new_row{charset} = 'iso-8859-2' if $old_row->{czech_language};
 	}
+	if (exists $old_row->{language}) {
+	    if ($old_row->{language} eq 'cz') {
+		$new_row{charset} = 'iso-8859-2';
+	    } else {
+		$new_row{charset} = $CHARSET_DEFAULT;
+	    }
+	}
+	if (exists $old_row->{document_table}) {
+	    $new_row{doc_table} = $old_row->{document_table};
+	}
+	if (exists $old_row->{document_id_field}) {
+	    $new_row{doc_id_field} = $old_row->{document_id_field};
+	}
+	if (exists $old_row->{document_fields}) {
+	    $new_row{doc_fields} = $old_row->{document_fields};
+	}
+	
 	print "... Inserting collection ($new_row{collection})\n" if $PA;
 	$self->db_insert_collection_table_row(\%new_row)
     }
@@ -687,7 +757,7 @@ sub _store_collection_info {
 	if $PA;
 
     my $sql = $self->db_store_collection_info;
-    my $document_fields = join (',', @{$self->{DOCUMENT_FIELDS}});
+    my $doc_fields = join (',', @{$self->{DOC_FIELDS}});
     my $stoplists = ref $self->{STOPLIST} ?
 	join (',', @{$self->{STOPLIST}}) : '';
 
@@ -696,16 +766,16 @@ sub _store_collection_info {
 			   $self->{COLLECTION},
 			   $DBIx::TextIndex::VERSION,
 			   $self->{MAX_INDEXED_ID},
-			   $self->{DOCUMENT_TABLE},
-			   $self->{DOCUMENT_ID_FIELD},
+			   $self->{DOC_TABLE},
+			   $self->{DOC_ID_FIELD},
 
-			   $document_fields,
-			   $self->{LANGUAGE},
+			   $doc_fields,
+			   $self->{CHARSET},
 			   $stoplists,
 			   $self->{PINDEX},
 
-			   $ERROR{quote_count},
 			   $ERROR{empty_query},
+			   $ERROR{quote_count},
 			   $ERROR{no_results},
 			   $ERROR{no_results_stop},
 
@@ -741,7 +811,7 @@ sub _fetch_collection_info {
 
     $fetch_status = 1 if $sth->rows;
 
-    my $document_fields;
+    my $doc_fields;
     my $stoplists;
 
     my $null;
@@ -749,11 +819,11 @@ sub _fetch_collection_info {
 		       \$null,
 		       \$self->{VERSION},
 		       \$self->{MAX_INDEXED_ID},
-		       \$self->{DOCUMENT_TABLE},
-		       \$self->{DOCUMENT_ID_FIELD},
+		       \$self->{DOC_TABLE},
+		       \$self->{DOC_ID_FIELD},
 
-		       \$document_fields,
-		       \$self->{LANGUAGE},
+		       \$doc_fields,
+		       \$self->{CHARSET},
 		       \$stoplists,
 		       \$self->{PINDEX},
 
@@ -773,13 +843,13 @@ sub _fetch_collection_info {
     $sth->fetch;
     $sth->finish;
 
-    my @document_fields = split /,/, $document_fields;
+    my @doc_fields = split /,/, $doc_fields;
     my @stoplists = split (/,\s*/, $stoplists);
 
-    $self->{DOCUMENT_FIELDS} = \@document_fields;
+    $self->{DOC_FIELDS} = \@doc_fields;
     $self->{STOPLIST} = \@stoplists;
 
-    $self->{CZECH_LANGUAGE} = $self->{LANGUAGE} eq 'cz' ? 1 : 0;
+    $self->{CZECH_LANGUAGE} = $self->{CHARSET} eq 'iso-8859-2' ? 1 : 0;
 
     return $fetch_status;
 
@@ -787,9 +857,9 @@ sub _fetch_collection_info {
 
 sub _phrase_search {
     my $self = shift;
-    my @result_documents = $self->{RESULT_VECTOR}->Index_List_Read;
-    return if $#result_documents < 0;
-    return if $#result_documents > $self->{PHRASE_THRESHOLD};
+    my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
+    return if $#result_docs < 0;
+    return if $#result_docs > $self->{PHRASE_THRESHOLD};
 
     my $vec_size = $self->max_indexed_id + 1;
     my $phrase_vector;
@@ -803,7 +873,7 @@ sub _phrase_search {
                 # full content scan
                 print "phrase search: '$phrase' using full content scan\n"
                     if $PA;
-		@found = @{$self->_phrase_fullscan(\@result_documents, $fno,
+		@found = @{$self->_phrase_fullscan(\@result_docs, $fno,
 						   $phrase)};
 	    } else {
                 # proximity scan
@@ -811,7 +881,7 @@ sub _phrase_search {
 		    $self->{QUERY_PROXIMITY}->[$fno]->[$phrase_c] : 1;
 		print "phrase search: '$phrase' using proximity index, proximity: $proximity\n"
 		    if $PA;				
-		@found = @{$self->_phrase_proximity(\@result_documents, $fno,
+		@found = @{$self->_phrase_proximity(\@result_docs, $fno,
 						    $phrase, $proximity)};
 	    }
 	    
@@ -836,38 +906,38 @@ sub _phrase_fullscan {
 	my $docref = shift;
 	my $fno = shift;
 	my $phrase = shift;
-	
-	my @documents = @{$docref};
-	my $documents = join(',', @documents);
+
+	my @docs = @{$docref};
+	my $docs = join(',', @docs);
 	my @found;
 
 	my $sql = $self->{CZECH_LANGUAGE} ? 
-	    $self->db_phrase_scan_cz($documents, $fno) :
-	    $self->db_phrase_scan($documents, $fno);
-        		  
-	my $sth = $self->{DOCUMENT_DBH}->prepare($sql);
-        
+	    $self->db_phrase_scan_cz($docs, $fno) :
+	    $self->db_phrase_scan($docs, $fno);
+
+	my $sth = $self->{DOC_DBH}->prepare($sql);
+
 	if ($self->{CZECH_LANGUAGE}) {
 	    $sth->execute;
 	} else {
 	    $sth->execute("%$phrase%");
 	}
 
-	my ($document_id, $content);
+	my ($doc_id, $content);
 	if ($self->{CZECH_LANGUAGE}) {
-	    $sth->bind_columns(\$document_id, \$content);
+	    $sth->bind_columns(\$doc_id, \$content);
 	} else {
-	    $sth->bind_columns(\$document_id);
+	    $sth->bind_columns(\$doc_id);
 	}
     
 	while($sth->fetch) {
 	    if ($self->{CZECH_LANGUAGE}) {
-		$content = $self->_trans($content);
-		push(@found, $document_id) if (index($content, $phrase) != -1);
-		print "content scan for $document_id, phrase = $phrase\n"
+		$content = $self->_lc_and_unac($content);
+		push(@found, $doc_id) if (index($content, $phrase) != -1);
+		print "content scan for $doc_id, phrase = $phrase\n"
 		    if $PA > 1;
 	    } else {
-		push(@found, $document_id);
+		push(@found, $doc_id);
 	    }
 	}
 
@@ -881,8 +951,8 @@ sub _phrase_proximity {
     my $phrase = shift;
     my $proximity = shift;
 
-    my @documents = @{$docref};
-    my $documents = join(',', @documents);
+    my @docs = @{$docref};
+    my $docs = join(',', @docs);
     my @found;
 
     my @pwords = grep { length($_) > 0 } split(/[^a-zA-Z0-9]+/, $phrase);
@@ -895,38 +965,38 @@ sub _phrase_proximity {
     }
 
     my $pwords = join(',', map { $self->{INDEX_DBH}->quote($_) } @pwords);
-    my $sql = $self->db_pindex_search($fno,	$pwords, $documents);
+    my $sql = $self->db_pindex_search($fno,	$pwords, $docs);
 
     my $sth = $self->{INDEX_DBH}->prepare($sql);
     my $rows = $sth->execute;
-    my($word, $document, $pos);
-    my %document;
-    my $last_document = 0;
-    $sth->bind_columns(\$word, \$document, \$pos);
+    my($word, $doc, $pos);
+    my %doc;
+    my $last_doc = 0;
+    $sth->bind_columns(\$word, \$doc, \$pos);
     my $i = 0;
 
     while($sth->fetch) {
 	$i++;
-	if ( ($document != $last_document && $last_document != 0) || $i == $rows) {
+	if ( ($doc != $last_doc && $last_doc != 0) || $i == $rows) {
 	    
-            # process the previous/last document
+            # process the previous/last doc
 	    
-	    push(@{$document{$word}}, $pos) if ($i == $rows);	# last document
+	    push(@{$doc{$word}}, $pos) if ($i == $rows);	# last doc
 
-	    if ($self->_proximity_match($proximity, $last_document, \@pwords,
-					\%document)) {
-		push(@found, $last_document);
-		print "phrase: proximity MATCHED document $last_document\n"
+	    if ($self->_proximity_match($proximity, $last_doc, \@pwords,
+					\%doc)) {
+		push(@found, $last_doc);
+		print "phrase: proximity MATCHED doc $last_doc\n"
 		    if $PA;
 	    } else {
-		print "phrase: proximity NOT matched document $last_document\n"
+		print "phrase: proximity NOT matched doc $last_doc\n"
 		    if $PA;
 	    }
-	    %document = 0;	# remove all words from this document
+	    %doc = 0;	# remove all words from this doc
     	}
 
-	push(@{$document{$word}}, $pos);
-	$last_document = $document;
+	push(@{$doc{$word}}, $pos);
+	$last_doc = $doc;
     }
 
     return \@found;
@@ -934,20 +1004,20 @@ sub _phrase_proximity {
 
 sub _proximity_match {
     my $self = shift;
-    my ($proximity, $doc_id, $pwords, $document) = @_;
+    my ($proximity, $doc_id, $pwords, $doc) = @_;
 
     my $occur = 1;
     my $match = 0;
-    print "phrase: proximity searching document $doc_id\n" if $PA;
+    print "phrase: proximity searching doc $doc_id\n" if $PA;
 
-    foreach my $fword_pos (@{$document->{$pwords->[0]}}) {
+    foreach my $fword_pos (@{$doc->{$pwords->[0]}}) {
         $match = 0;
         print qq(base phrase word "$pwords->[0]",if occurency $occur at $fword_pos\n)
 	    if $PA > 1;
         for(my $i = 0; $i < @{$pwords} - 1; $i++) {
             $match = 0;
             my $window = $i + $proximity;
-            foreach my $sword_pos (@{$document->{$pwords->[$i+1]}}) {
+            foreach my $sword_pos (@{$doc->{$pwords->[$i+1]}}) {
                 print "sequence word $pwords->[$i+1] at $sword_pos\n"
                     if $PA > 1;
                 if ($sword_pos > $fword_pos &&
@@ -972,15 +1042,18 @@ sub _proximity_match {
     return $match;
 }
 
-sub _vector_search {
+sub _fetch_vectors {
     my $self = shift;
     my $maxid = $self->max_indexed_id + 1;
     foreach my $field_no ( @{$self->{QUERY_FIELD_NOS}} ) {
 	foreach my $word ( @{$self->{QUERY_WORDS}->[$field_no]} ) {
 	    if (not $self->{VECTOR}->[$field_no]->{$word}) {
             	# vector for this word has not been yet defined in _parse_query
+		my ($freq_d, $docs_vector) =
+		    $self->_fetch_freq_and_docs_vector($field_no, $word);
 		$self->{VECTOR}->[$field_no]->{$word} = Bit::Vector->new_Enum(
-                  $maxid, $self->_fetch_documents_vector($field_no, $word));
+                    $maxid, $docs_vector);
+		$self->{FREQ_D}->[$field_no]->{$word} = $freq_d;
 	    }
 	}
     }
@@ -994,7 +1067,7 @@ sub _fetch_maxtf {
 
     my $field_nos;
     if ($use_all_fields) {
-	$field_nos = join ',', (0 .. $#{$self->{DOCUMENT_FIELDS}});
+	$field_nos = join ',', (0 .. $#{$self->{DOC_FIELDS}});
     } else {
 	$field_nos = join ',', @{$self->{QUERY_FIELD_NOS}};
     }
@@ -1017,113 +1090,176 @@ sub _search {
 
     my $self = shift;
 
-    my @result_documents = $self->{RESULT_VECTOR}->Index_List_Read;
+    my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
 
     my %score;
 
-    return $ERROR{'no_results'} if $#result_documents < 0;
+    throw $QRY( error => $ERROR{'no_results'} ) if $#result_docs < 0;
 
-    if ($self->{OR_WORD_COUNT} == 1 && $self->{AND_WORD_COUNT} == 0
-	&& $#result_documents > $self->{RESULT_THRESHOLD}) {
+    # Special case: only one word in query and word is not very selective,
+    # so don't bother tf-idf scoring, just return results sorted by freq_dt
+    my $and_plus_or = $self->{OR_WORD_COUNT} + $self->{AND_WORD_COUNT};
+    if ($and_plus_or == 1 && $#result_docs > $self->{RESULT_THRESHOLD}) {
 
 	my $field_no = $self->{QUERY_FIELD_NOS}->[0];
 	my $word = $self->{QUERY_OR_WORDS}->[$field_no]->[0];
 
-	my $occurence = $self->_occurence($field_no, $word);
+	my $freq_d = $self->_freq_d($field_no, $word);
 
 	# idf should use a collection size instead of max_indexed_id
 
 	my $idf;
-	if ($occurence) {
-	    $idf = log($self->{MAX_INDEXED_ID}/$occurence);
+	if ($freq_d) {
+	    $idf = log($self->{MAX_INDEXED_ID}/$freq_d);
 	} else {
 	    $idf = 0;
 	}
 
-	return $ERROR{'no_results'} if $idf < $IDF_THRESHOLD;
+	throw $QRY( error => $ERROR{'no_results'} ) if $idf < $IDF_THRESHOLD;
 
-	my %raw_score = $self->_documents($field_no, $word);
+	my %raw_score = $self->_docs($field_no, $word);
 
 	if ($self->{VALID_MASK}) {
-	    foreach my $document_id (@result_documents) {
-		$score{$document_id} = $raw_score{$document_id};
+	    foreach my $doc_id (@result_docs) {
+		$score{$doc_id} = $raw_score{$doc_id};
 	    }
 	    return \%score;
 	} else {
 	    return \%raw_score;
 	}
 
-    } else {
-	$self->_fetch_maxtf;
-	foreach my $field_no ( @{$self->{QUERY_FIELD_NOS}} ) {
-	  WORD:
-	    foreach my $word (@{$self->{QUERY_OR_WORDS}->[$field_no]},
-			      @{$self->{QUERY_AND_WORDS}->[$field_no]} ) {
+    }
 
-		my $occurence = $self->_occurence($field_no, $word);
-		# next WORD unless defined $occurence;
-		$occurence = 1 unless defined $occurence;
+    # Otherwise do tf-idf
+    $self->_fetch_maxtf;
+    foreach my $field_no ( @{$self->{QUERY_FIELD_NOS}} ) {
+      WORD:
+	foreach my $word (@{$self->{QUERY_OR_WORDS}->[$field_no]},
+			  @{$self->{QUERY_AND_WORDS}->[$field_no]} ) {
+	    
+	    my $freq_d = $self->_freq_d($field_no, $word);
+	    # next WORD unless defined $freq_d;
+	    $freq_d = 1 unless defined $freq_d;
 
-		my $idf;
-		if ($occurence) {
-		    $idf = log($self->{MAX_INDEXED_ID}/$occurence);
+	    my $idf;
+	    if ($freq_d) {
+		$idf = log($self->{MAX_INDEXED_ID}/$freq_d);
+	    } else {
+		$idf = 0;
+	    }
+
+	    next WORD if $idf < $IDF_THRESHOLD;
+
+	    my %word_score = $self->_docs($field_no, $word);
+
+	  DOC_ID:
+
+	    foreach my $doc_id (@result_docs) {
+		# next DOC_ID unless defined $word_score{$doc_id};
+		$word_score{$doc_id} = 1 unless defined $word_score{$doc_id};
+		
+		my $maxtf = $self->{MAXTF}->[$field_no]->[$doc_id];
+		my $sqrt_maxtf = sqrt($maxtf);
+		$sqrt_maxtf = 1 unless $sqrt_maxtf;
+		if ($score{$doc_id}) {
+		    $score{$doc_id} *=
+			(1 + (($word_score{$doc_id}/$sqrt_maxtf) * $idf));
 		} else {
-		    $idf = 0;
-		}
-
-		next WORD if $idf < $IDF_THRESHOLD;
-
-		my %word_score = $self->_documents($field_no, $word);
-
-	      DOCUMENT_ID:
-
-		foreach my $document_id (@result_documents) {
-		    # next DOCUMENT_ID unless defined $word_score{$document_id};
-		    $word_score{$document_id} = 1 unless defined $word_score{$document_id};
-
-		    my $maxtf = $self->{MAXTF}->[$field_no]->[$document_id];
-		    my $sqrt_maxtf = sqrt($maxtf);
-		    $sqrt_maxtf = 1 unless $sqrt_maxtf;
-		    if ($score{$document_id}) {
-			$score{$document_id} *=
-			    (1 + (($word_score{$document_id}/$sqrt_maxtf) * $idf));
-		    } else {
-			$score{$document_id} = (1 + (($word_score{$document_id}/$sqrt_maxtf) * $idf));
-		    }
+		    $score{$doc_id} = (1 + (($word_score{$doc_id}/$sqrt_maxtf) * $idf));
 		}
 	    }
 	}
-	unless (scalar keys %score) {
-		if (not @{$self->{STOPLISTED_QUERY}}) {
-			return $ERROR{no_results};
-		}
-		else {
-			return $self->_stoplisted_error;
-		}
-	}
-	return \%score;
-
     }
+    unless (scalar keys %score) {
+	if (not @{$self->{STOPLISTED_QUERY}}) {
+	    throw $QRY( error => $ERROR{no_results} );
+	} else {
+	    throw $QRY( error => $self->_format_stoplisted_error );
+	}
+    }
+    return \%score;
 
 }
 
-sub _stoplisted_error {
-	my $self = shift;
-	my $stoped = join(', ', @{$self->{STOPLISTED_QUERY}});
-	return $ERROR{no_results_stop}.' '.$stoped.'.';
+sub _format_stoplisted_error {
+    my $self = shift;
+    my $stopped = join(', ', @{$self->{STOPLISTED_QUERY}});
+    return qq($ERROR{no_results_stop} $stopped.);
 }
 
-sub _occurence {
+sub _freq_d {
     my $self = shift;
     my $field_no = shift;
     my $word = shift;
     return undef unless $word;
-    my $sql = $self->db_occurence($self->{INVERTED_TABLES}->[$field_no]);
+    if ($self->{FREQ_D}->[$field_no]->{$word}) {
+	return $self->{FREQ_D}->[$field_no]->{$word};
+    }
+    my $sql = $self->db_freq_d($self->{INVERTED_TABLES}->[$field_no]);
     my $sth = $self->{INDEX_DBH}->prepare($sql);
     $sth->execute($word);
-    my ($occurence) = $sth->fetchrow_array;
-    return undef unless $occurence;
-    return $occurence;
+    my ($freq_d) = $sth->fetchrow_array;
+    return undef unless $freq_d;
+    return $freq_d;
+}
+
+######################################################################
+#
+# _optimize_or_search()
+#
+#   If query contains large number of OR words,
+#   turn the rarest words into AND words to reduce result set size
+#   before scoring.
+#
+#   Algorithm: if there are four or less query words turn the two
+#   least frequent OR words into AND words. For five or more query
+#   words, make the three least frequent words OR words into AND words.
+#
+#   Does nothing if AND words already exist
+#
+
+sub _optimize_or_search {
+    my $self = shift;
+
+    foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
+
+	my $or_word_count = 0; my $and_word_count = 0;
+
+	$or_word_count = $#{ $self->{QUERY_OR_WORDS}->[$fno] } + 1;
+	$and_word_count = $#{ $self->{QUERY_AND_WORDS}->[$fno] } + 1;
+
+	return if $and_word_count > 0;
+	return if $or_word_count < 1;
+
+	# sort in order of freq_d
+	my @or_words = sort { $self->{FREQ_D}->[$fno]->{$a} <=> $self->{FREQ_D}->[$fno]->{$b} } @{$self->{QUERY_OR_WORDS}->[$fno]};
+	
+	my @new_and_words;
+	if ($or_word_count == 1) {
+	    push @new_and_words, shift @or_words;
+	    $or_word_count--;
+	    $and_word_count++;
+	} elsif ($or_word_count >=2 && $or_word_count <= 4) {
+	    push @new_and_words, shift @or_words;
+	    push @new_and_words, shift @or_words;
+	    $or_word_count  -= 2;
+	    $and_word_count += 2;
+	} elsif ($or_word_count > 4) {
+	    push @new_and_words, shift @or_words;
+	    push @new_and_words, shift @or_words;
+	    push @new_and_words, shift @or_words;
+	    $or_word_count  -= 3;
+	    $and_word_count += 3;
+	}
+
+	$self->{QUERY_OR_WORDS}->[$fno] = \@or_words;
+	push @{ $self->{QUERY_AND_WORDS}->[$fno] }, @new_and_words;
+
+	# FIXME: should these be cumulative across fields?
+	$self->{OR_WORD_COUNT} += $or_word_count;
+	$self->{AND_WORD_COUNT} += $and_word_count;
+
+    }
 }
 
 sub _boolean_compare {
@@ -1132,55 +1268,46 @@ sub _boolean_compare {
 
     my $vec_size = $self->{MAX_INDEXED_ID} + 1;
 
-    my @vector;
+    my @vectors;
     my $i = 0;
     foreach my $fno ( @{$self->{QUERY_FIELD_NOS}} ) {
 
-	my $or_word_count = 0; my $and_word_count = 0;
-
-	$or_word_count = $#{ $self->{QUERY_OR_WORDS}->[$fno] } + 1;
-	$and_word_count = $#{ $self->{QUERY_AND_WORDS}->[$fno] } + 1;
-
-	$self->{OR_WORD_COUNT} += $or_word_count;
-	$self->{AND_WORD_COUNT} += $and_word_count;
-
-	$vector[$i] = Bit::Vector->new($vec_size);
-
-	if ($or_word_count < 1) {
-	    $vector[$i]->Fill;
+	$vectors[$i] = Bit::Vector->new($vec_size);
+	if ($self->{OR_WORD_COUNT} < 1) {
+	    $vectors[$i]->Fill;
 	} else {
-	    $vector[$i]->Empty;
+	    $vectors[$i]->Empty;
 	}
 
 	foreach my $word ( @{$self->{QUERY_OR_WORDS}->[$fno]} ) {
-	    $vector[$i]->Union($vector[$i],
+	    $vectors[$i]->Union($vectors[$i],
 				 $self->{VECTOR}->[$fno]->{$word});
 
 	}
 
 	foreach my $word ( @{$self->{QUERY_AND_WORDS}->[$fno]} ) {
-	    $vector[$i]->Intersection($vector[$i],
+	    $vectors[$i]->Intersection($vectors[$i],
 					$self->{VECTOR}->[$fno]->{$word});
 
 	}
 
 	foreach my $word ( @{$self->{QUERY_NOT_WORDS}->[$fno]} ) {
 	    $self->{VECTOR}->[$fno]->{$word}->Flip;
-	    $vector[$i]->Intersection($vector[$i],
+	    $vectors[$i]->Intersection($vectors[$i],
 					$self->{VECTOR}->[$fno]->{$word});
 
 	}
 	$i++;
     }
 
-    $self->{RESULT_VECTOR} = $vector[0];
+    $self->{RESULT_VECTOR} = Bit::Vector->new($vec_size);
+    $self->{RESULT_VECTOR}->Index_List_Store($self->all_doc_ids);
 
-    if ($#vector > 0) {
-	foreach my $vector (@vector[1 .. $#vector]) {
-	    $self->{RESULT_VECTOR}->Union($self->{RESULT_VECTOR}, $vector);
-	}
+    foreach my $vector (@vectors) {
+	$self->{RESULT_VECTOR}->Intersection($self->{RESULT_VECTOR}, $vector);
     }
 }
+
 
 sub _apply_mask {
 
@@ -1266,12 +1393,12 @@ sub _fetch_mask {
 	next if $sth->rows < 1;
 	$mask_count += $sth->rows;
 
-	my $documents_vector;
-	$sth->bind_col(1, \$documents_vector);
+	my $docs_vector;
+	$sth->bind_col(1, \$docs_vector);
 	$sth->fetch;
 
 	$self->{MASK_VECTOR}->{$mask} =
-		Bit::Vector->new_Enum(($self->{MAX_INDEXED_ID} + 1), $documents_vector);
+		Bit::Vector->new_Enum(($self->{MAX_INDEXED_ID} + 1), $docs_vector);
 
 	$i++;
 
@@ -1281,213 +1408,218 @@ sub _fetch_mask {
     return $mask_count;
 }
 
+sub _parse_query_fields {
+    my $self = shift;
+
+    # Quick check to make sure we have a query in at least on field
+    my $have_query = 0;
+    foreach my $field_no ( @{$self->{QUERY_FIELD_NOS}} ) {
+	my $query = $self->{QUERY}->[$field_no];
+	$have_query++ if $query =~ m/\S+/;
+
+    }
+    throw $QRY( error => $ERROR{'empty_query'} ) unless $have_query;
+
+    foreach my $field_no ( @{$self->{QUERY_FIELD_NOS}} ) {
+	$self->_parse_query( $self->{QUERY}->[$field_no], $field_no );
+    }
+
+}
+
 sub _parse_query {
 
     my $self = shift;
-    my $error;
+    my ($query, $field_no) = @_;
 
-    foreach my $field_no ( @{$self->{QUERY_FIELD_NOS}} ) {
+    my $string_length = length($query);
 
-    	my $query = $self->{QUERY}->[$field_no];
-    	return $ERROR{'empty_query'} unless $query;
-    	my $string_length = length($query);
+    my $in_phrase = 0;
+    my $phrase_count = 0;
+    my $quote_count = 0;
+    my $word_count = 0;
+    my @raw_phrase = ();
+    my $word = "";
+    my (@phrase, @words, @and_words, @or_words, @not_words, @all_words,
+	@proximity, @wildcards, @highlight);
 
-    	my $in_phrase = 0;
-    	my $phrase_count = 0;
-    	my $quote_count = 0;
-    	my $word_count = 0;
-    	my @raw_phrase = ();
-    	my $word = "";
-    	my (@phrase, @words, @and_words, @or_words, @not_words, @all_words,
-    		@proximity, @wildcards, @highlight);
+    $query = $self->_lc_and_unac($query);
 
-	$query = $self->_trans($query);
-
-    	for my $position (0 .. ($string_length - 1)) {
-    	    my $char = substr($query, $position, 1);
-    	    if ($char eq '"') {
-		$quote_count++;
-	    }
-    	    $phrase_count = int(($quote_count - 1)/ 2);
-    	    if ($quote_count % 2 != 0 && $char ne '"') {
-		$raw_phrase[$phrase_count] .= $char;
-    	    } else {
-		$word .= $char;
-    	    }
-    	}
-
-    	@words = grep {
-
-	    $_ =~ tr/[a-zA-Z0-9*%+-]//cd;
-            length($_) > 0;
-
-    	} split(/\s+/, $word);
-
-    	foreach my $word (@words) {
-	    $word =~ m/^([+-])?(\w+)([%*])?$/;
-            my $op = $1;
-            my $pword = $2;
-            my $wild = $3;
-
-	    $pword = substr($pword, 0, $self->{MAX_WORD_LENGTH});
-            next if ($self->_stoplisted($pword));
-
-            print "parsed word: $pword".($wild ? "; wildcard: $wild" : '')."\n"
-            	if $PA;
-	    my @vec;
-	    my $setvector = 0;
-	    my $maxid = $self->max_indexed_id + 1;
-            if ($wild eq '%') {
-            	next if (length($pword) < $self->{MIN_WILDCARD_LENGTH});
-
-                my $table = $self->{INVERTED_TABLES}->[$field_no];
-		my $sql = $self->db_fetch_words($table);
-       	        my $words = $self->{INDEX_DBH}->selectcol_arrayref($sql,
-						  undef, "$pword%");
-
-                foreach my $word (@{$words}) {
-		    if ($op eq '+') {
-			push(@vec, Bit::Vector->new_Enum($maxid,
-			    $self->_fetch_documents_vector($field_no, $word)));
-			$setvector = 1;
-                    	push(@all_words, $word);
-                        next;
-		    } elsif ($op eq '-') {
-                        push @not_words, $word;
-                    } else {
-                        push @or_words, $word;
-                    }
-                    push (@all_words, $word);
-		    push(@wildcards, $wild);
-               	}
-		push(@highlight, $pword);
-                if ($setvector) {
-		    push(@and_words, $pword);
-                    push(@all_words, $pword);
-		    push(@wildcards, $wild);
-                    my $unionvec = Bit::Vector->new($maxid);
-                    foreach my $vec (@vec) {
-			$unionvec->Union($unionvec, $vec);
-                    }
-		    $self->{VECTOR}->[$field_no]->{$pword} = $unionvec;
-                }
-            } elsif ($wild eq '*') {
-                if ($op eq '+') {
-		    push(@vec, Bit::Vector->new_Enum($maxid,
-			 $self->_fetch_documents_vector($field_no, $pword)));
-		    push(@vec, Bit::Vector->new_Enum($maxid,
-		       $self->_fetch_documents_vector($field_no, $pword.'s')));
-
-                    push(@and_words, $pword);
-
-                    my $unionvec = Bit::Vector->new($maxid);
-                    foreach my $vec (@vec) {
-			$unionvec->Union($unionvec, $vec);
-                    }
-		    $self->{VECTOR}->[$field_no]->{$pword} = $unionvec;
-                } elsif ($op eq '-') {
-                    push (@not_words, $pword);
-                    push (@not_words, $pword.'s');
-                } else {
-                    push (@or_words, $pword);
-                    push (@or_words, $pword.'s');
-                }
-
-                push(@all_words, $pword);
-                push(@all_words, $pword.'s');
-		push(@highlight, $pword);
-                push(@wildcards, $wild);
-	    } else {  # Not wild
-                if ($op eq '+') {
-                    push @and_words, $pword;
-                } elsif ($op eq '-') {
-                    push @not_words, $pword;
-                } else {
-                    push @or_words, $pword;
-                }
-
-                push @all_words, $pword;
-		push(@highlight, $pword);
-                push(@wildcards, undef);
-            }
-    	}
-
-    	foreach my $phrase (@raw_phrase) {
-	    $phrase =~ s/^:(\d+)\s+(.+)$/$2/;
-	    my $proximity = $1;
-    	    my @split_phrase = split/\s+/, $phrase;
-    	    $word_count = @split_phrase;
-    	    if ($word_count == 1) {
-    	    	if (not $self->_stoplisted($phrase)) {
-		    push @or_words, $phrase;
-		    push @all_words, $phrase;
-		    push(@highlight, $phrase);
-		    push(@wildcards, undef);
-                 }
-    	    } elsif ($phrase =~ m/^\s*$/) {
-		next;
-    	    } else {
-            	my $stop = 0;
-		my @p_words;
-                foreach my $word (@split_phrase) {
-		    if (not $self->_stoplisted($word)) {
-			push @p_words, $word;
-		    } else {
-			$stop = 1;
-                        last;
-                    }
-		}
-		if (not $stop) {
-		    push @and_words, @p_words;
-		    push @all_words, @p_words;
-		    push (@phrase, $phrase);
-		    push (@proximity, $proximity) if ($self->{PINDEX});
-		}
-    	    }
-    	}	#  end of phrase processing
-
-    	if ($quote_count % 2 != 0) {
-    	    $error = $ERROR{'$quote_count'};
-    	}
-
-    	$self->{QUERY_PHRASES}->[$field_no] = \@phrase;
-    	$self->{QUERY_PROXIMITY}->[$field_no] = \@proximity
-	    if ($self->{PINDEX});
-
-	$self->{QUERY_WILDCARDS}->[$field_no] = \@wildcards;
-	$self->{QUERY_HIGHLIGHT}->[$field_no] = \@highlight;
-
-    	$self->{QUERY_OR_WORDS}->[$field_no] = \@or_words;
-    	$self->{QUERY_AND_WORDS}->[$field_no] = \@and_words;
-    	$self->{QUERY_NOT_WORDS}->[$field_no] = \@not_words;
-    	$self->{QUERY_WORDS}->[$field_no] = \@all_words;
-
-    	$self->{HIGHLIGHT} = join '|', @all_words;
-	
-    }	# end of field processing
-
-    return $error;
-}
-
-# here come all translations related to case, accented characters
-# or diacritics, we must normalize everything to lower case
-
-sub _trans {
-    my $self = shift;
-    my $s = shift;
-
-    if ($self->{CZECH_LANGUAGE}) {
-	$s = &CzFast::czrecode('iso-8859-2', 'ascii', $s);
-    } else {
-    	# accents
-	$s =~ tr/\xe8\xe9\xf1\xe1/eena/;
+    for my $position (0 .. ($string_length - 1)) {
+	my $char = substr($query, $position, 1);
+	if ($char eq '"') {
+	    $quote_count++;
+	}
+	$phrase_count = int(($quote_count - 1)/ 2);
+	if ($quote_count % 2 != 0 && $char ne '"') {
+	    $raw_phrase[$phrase_count] .= $char;
+	} else {
+	    $word .= $char;
+	}
     }
 
+    if ($quote_count % 2 != 0) {
+	throw $QRY( error => $ERROR{'quote_count'} );
+    }
+
+    @words = grep {
+
+	$_ =~ tr/[a-zA-Z0-9*%+-]//cd;
+	length($_) > 0;
+
+    } split(/\s+/, $word);
+
+    foreach my $word (@words) {
+	$word =~ m/^([+-])?(\w+)([%*])?$/;
+	my $op = $1;
+	my $pword = $2;
+	my $wild = $3;
+
+	$pword = substr($pword, 0, $self->{MAX_WORD_LENGTH});
+	next if ($self->_stoplisted($pword));
+
+	print "parsed word: $pword".($wild ? "; wildcard: $wild" : '')."\n"
+	    if $PA;
+	my @vec;
+	my $setvector = 0;
+	my $maxid = $self->max_indexed_id + 1;
+	if ($wild eq '%') {
+	    next if (length($pword) < $self->{MIN_WILDCARD_LENGTH});
+
+	    my $table = $self->{INVERTED_TABLES}->[$field_no];
+	    my $sql = $self->db_fetch_words($table);
+	    my $words = $self->{INDEX_DBH}->selectcol_arrayref($sql,
+				       undef, "$pword%");
+
+	    foreach my $word (@{$words}) {
+		if ($op eq '+') {
+		    push(@vec, Bit::Vector->new_Enum($maxid,
+		        $self->_fetch_docs_vector($field_no, $word)));
+		    $setvector = 1;
+		    push @all_words, $word;
+		    next;
+		} elsif ($op eq '-') {
+		    push @not_words, $word;
+		} else {
+		    push @or_words, $word;
+		}
+		push @all_words, $word;
+		push @wildcards, $wild;
+	    }
+
+	    push(@highlight, $pword);
+
+	    if ($setvector) {
+		push(@and_words, $pword);
+		push(@all_words, $pword);
+		push(@wildcards, $wild);
+		my $unionvec = Bit::Vector->new($maxid);
+		foreach my $vec (@vec) {
+		    $unionvec->Union($unionvec, $vec);
+		}
+		$self->{VECTOR}->[$field_no]->{$pword} = $unionvec;
+	    }
+	} elsif ($wild eq '*') {
+	    if ($op eq '+') {
+		push(@vec, Bit::Vector->new_Enum($maxid,
+						 $self->_fetch_docs_vector($field_no, $pword)));
+		push(@vec, Bit::Vector->new_Enum($maxid,
+						 $self->_fetch_docs_vector($field_no, $pword.'s')));
+
+		push(@and_words, $pword);
+
+		my $unionvec = Bit::Vector->new($maxid);
+		foreach my $vec (@vec) {
+		    $unionvec->Union($unionvec, $vec);
+		}
+		$self->{VECTOR}->[$field_no]->{$pword} = $unionvec;
+	    } elsif ($op eq '-') {
+		push (@not_words, $pword);
+		push (@not_words, $pword.'s');
+	    } else {
+		push (@or_words, $pword);
+		push (@or_words, $pword.'s');
+	    }
+
+	    push(@all_words, $pword);
+	    push(@all_words, $pword.'s');
+	    push(@highlight, $pword);
+	    push(@wildcards, $wild);
+	} else {  # Not wild
+	    if ($op eq '+') {
+		push @and_words, $pword;
+	    } elsif ($op eq '-') {
+		push @not_words, $pword;
+	    } else {
+		push @or_words, $pword;
+	    }
+
+	    push @all_words, $pword;
+	    push(@highlight, $pword);
+	    push(@wildcards, undef);
+	}
+    }
+
+    foreach my $phrase (@raw_phrase) {
+	$phrase =~ s/^:(\d+)\s+(.+)$/$2/;
+	my $proximity = $1;
+	my @split_phrase = split/\s+/, $phrase;
+	$word_count = @split_phrase;
+	if ($word_count == 1) {
+	    if (not $self->_stoplisted($phrase)) {
+		push @or_words, $phrase;
+		push @all_words, $phrase;
+		push(@highlight, $phrase);
+		push(@wildcards, undef);
+	    }
+	} elsif ($phrase =~ m/^\s*$/) {
+	    next;
+	} else {
+	    my $stop = 0;
+	    my @p_words;
+	    foreach my $word (@split_phrase) {
+		if (not $self->_stoplisted($word)) {
+		    push @p_words, $word;
+		} else {
+		    $stop = 1;
+		    last;
+		}
+	    }
+	    if (not $stop) {
+		push @and_words, @p_words;
+		push @all_words, @p_words;
+		push (@phrase, $phrase);
+		push (@proximity, $proximity) if ($self->{PINDEX});
+	    }
+	}
+    }	#  end of phrase processing
+
+    $self->{QUERY_PHRASES}->[$field_no] = \@phrase;
+    $self->{QUERY_PROXIMITY}->[$field_no] = \@proximity
+	if ($self->{PINDEX});
+
+    $self->{QUERY_WILDCARDS}->[$field_no] = \@wildcards;
+    $self->{QUERY_HIGHLIGHT}->[$field_no] = \@highlight;
+
+    $self->{QUERY_OR_WORDS}->[$field_no] = \@or_words;
+    $self->{QUERY_AND_WORDS}->[$field_no] = \@and_words;
+    $self->{QUERY_NOT_WORDS}->[$field_no] = \@not_words;
+    $self->{QUERY_WORDS}->[$field_no] = \@all_words;
+
+    $self->{HIGHLIGHT} = join '|', @all_words;
+
+}
+
+# Set everything to lowercase and change accented characters to
+# unaccented equivalents
+sub _lc_and_unac {
+    my $self = shift;
+    my $s = shift;
+    $s = unac_string($self->{CHARSET}, $s);
     $s = lc($s);
     return $s;
 }
 
-sub _documents {
+sub _docs {
 
     my $self = shift;
     my $field_no = shift;
@@ -1496,48 +1628,60 @@ sub _documents {
     local $^W = 0; # turn off silly uninitialized value warning
     if (@_) {
 	my ($id, $frequency) = @_;
-	$self->{DOCUMENTS}->[$field_no]->{$word} .=
+	$self->{DOCS}->[$field_no]->{$word} .=
 	    pack 'ww', ($id, $frequency);
-	$self->{OCCURENCE}->[$field_no]->{$word}++; 
+	$self->{FREQ_D}->[$field_no]->{$word}++; 
     } else {
-	unpack 'w*', $self->_fetch_documents($field_no, $word);
+	unpack 'w*', $self->_fetch_docs($field_no, $word);
     }
 
 }
 
-sub _fetch_documents {
+sub _fetch_docs {
     my $self = shift;
     my $field_no = shift;
     my $word = shift;
 
-    my $sql = $self->db_fetch_documents($self->{INVERTED_TABLES}->[$field_no]);
+    my $sql = $self->db_fetch_docs($self->{INVERTED_TABLES}->[$field_no]);
     my $sth = $self->{INDEX_DBH}->prepare($sql);
     $sth->execute($word);
 
-    my $documents;
-    $sth->bind_col(1, \$documents);
+    my $docs;
+    $sth->bind_col(1, \$docs);
     $sth->fetch;
     $sth->finish;
-    return $documents;
+    return $docs;
 }
 
-sub _fetch_documents_vector {
+sub _fetch_freq_and_docs_vector {
     my $self = shift;
     my $field_no = shift;
     my $word = shift;
 
     print qq(Fetching vector for "$word"\n) if $PA;
 
-    my $sql = $self->db_fetch_documents_vector(
+    my $sql = $self->db_fetch_freq_and_docs_vector(
+        $self->{INVERTED_TABLES}->[$field_no]);
+    return $self->{INDEX_DBH}->selectrow_array($sql, undef, $word);
+}
+
+sub _fetch_docs_vector {
+    my $self = shift;
+    my $field_no = shift;
+    my $word = shift;
+
+    print qq(Fetching vector for "$word"\n) if $PA;
+
+    my $sql = $self->db_fetch_docs_vector(
         $self->{INVERTED_TABLES}->[$field_no]);
     return scalar $self->{INDEX_DBH}->selectrow_array($sql, undef, $word);
 }
 
-sub _commit_documents {
+sub _commit_docs {
 
     my $self = shift;
 
-    print "Storing max term frequency for each document\n" if $PA;
+    print "Storing max term frequency for each doc\n" if $PA;
 
     my $use_all_fields = 1;
     $self->_fetch_maxtf($use_all_fields);
@@ -1545,7 +1689,7 @@ sub _commit_documents {
     my $sql = $self->db_update_maxtf;
 	my $sth = $self->{INDEX_DBH}->prepare($sql);
 
-    foreach my $field_no ( 0 .. $#{$self->{DOCUMENT_FIELDS}} ) {
+    foreach my $field_no ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	my @maxtf;
 	if ($#{$self->{MAXTF}->[$field_no]} >= 0) {
 	    @maxtf = @{$self->{MAXTF}->[$field_no]};
@@ -1562,16 +1706,15 @@ sub _commit_documents {
 
     print "Committing inverted tables to database\n" if $PA;
 
-    foreach my $field_no ( 0 .. $#{$self->{DOCUMENT_FIELDS}} ) {
+    foreach my $field_no ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 
 	my $sql = $self->db_inverted_replace($self->{INVERTED_TABLES}->[$field_no]);
 	my $i_sth = $self->{INDEX_DBH}->prepare($sql);
 
-	print("field$field_no ", scalar keys %{$self->{DOCUMENTS}->[$field_no]},
+	print("field$field_no ", scalar keys %{$self->{DOCS}->[$field_no]},
 	       " distinct words\n") if $PA;
 
-	while (my ($word, $documents) = each %{$self->{DOCUMENTS}->[$field_no]}) {
-
+	while (my ($word, $docs) = each %{$self->{DOCS}->[$field_no]}) {
 	    print "$word\n" if $PA >= 2;
 
 	    my $sql = $self->db_inverted_select($self->{INVERTED_TABLES}->[$field_no]);
@@ -1579,77 +1722,137 @@ sub _commit_documents {
 
 	    $s_sth->execute($word);
 
-	    my $o_occurence = 0;
-	    my $o_documents_vector = '';
-	    my $o_documents = '';
+	    my $o_freq_d = 0;
+	    my $o_docs_vector = '';
+	    my $o_docs = '';
 
-	    $s_sth->bind_columns(\$o_occurence, \$o_documents_vector,
-	    	\$o_documents);
+	    $s_sth->bind_columns(\$o_freq_d, \$o_docs_vector,
+	    	\$o_docs);
 
 	    $s_sth->fetch;
 	    $s_sth->finish;
 
-	    my %frequencies = unpack 'w*', $documents;
+	    my %frequencies = unpack 'w*', $docs;
 
 	    my $o_vector = Bit::Vector->new_Enum(($self->{MAX_INDEXED_ID} + 1),
-	    	$o_documents_vector);
+	    	$o_docs_vector);
 		my $vector = Bit::Vector->new($self->{MAX_INDEXED_ID} + 1);
 		$vector->Index_List_Store(keys %frequencies);
 		$vector->Union($o_vector, $vector);
 
 	    local $^W = 0;
 	    $i_sth->execute($word,
-			    ($self->{OCCURENCE}->[$field_no]->{$word} + $o_occurence),
+			    ($self->{FREQ_D}->[$field_no]->{$word} + $o_freq_d),
 			    $vector->to_Enum,
-			    ($o_documents . $documents)) or warn $self->{INDEX_DBH}->err;
+			    ($o_docs . $docs)) or warn $self->{INDEX_DBH}->err;
 
 	}
+	# Flush temporary hashes after data is stored
+	$self->{DOCS}->[$field_no] = ();
+	$self->{FREQ_D}->[$field_no] = ();
 
 	$i_sth->finish;
 
     }
 }
 
+sub _all_doc_ids_remove {
+    my $self = shift;
+    my @ids = @_;
+    # doc_id bits to unset
+    if (ref $ids[0] eq 'ARRAY') {
+	@ids = @{$ids[0]};
+    }
 
-sub _fetch_document {
+    unless (ref $self->{ALL_DOCS_VECTOR}) {
+	$self->{ALL_DOCS_VECTOR} = Bit::Vector->new_Enum(
+               $self->max_indexed_id + 1,
+	       $self->_fetch_all_docs_vector
+	   );
+    }
+
+    if (@ids) {
+	$self->{ALL_DOCS_VECTOR}->Index_List_Remove(@ids);
+	$self->{INDEX_DBH}->do($self->db_update_all_docs_vector, undef, $self->{ALL_DOCS_VECTOR}->to_Enum);
+    }
+
+}
+
+sub all_doc_ids {
+    my $self = shift;
+    my @ids = @_;
+
+    # doc_id bits to set
+    if (ref $ids[0] eq 'ARRAY') {
+	@ids = @{$ids[0]};
+    }
+
+    unless (ref $self->{ALL_DOCS_VECTOR}) {
+	$self->{ALL_DOCS_VECTOR} = Bit::Vector->new_Enum(
+               $self->max_indexed_id + 1,
+	       $self->_fetch_all_docs_vector
+	   );
+    }
+
+    if (@ids) {
+	if ($self->{ALL_DOCS_VECTOR}->Size() < $self->max_indexed_id + 1) {
+	    $self->{ALL_DOCS_VECTOR}->Resize($self->max_indexed_id + 1);
+	}
+	$self->{ALL_DOCS_VECTOR}->Index_List_Store(@ids);
+	$self->{INDEX_DBH}->do($self->db_update_all_docs_vector, undef, $self->{ALL_DOCS_VECTOR}->to_Enum);
+    }
+
+    return $self->{ALL_DOCS_VECTOR}->Index_List_Read;
+}
+
+
+sub _fetch_all_docs_vector {
+    my $self = shift;
+    my $field_no = shift;
+    my $word = shift;
+
+    my $sql = $self->db_fetch_all_docs_vector;
+    return scalar $self->{INDEX_DBH}->selectrow_array($sql);
+}
+
+
+sub _fetch_doc {
     my $self = shift;
     my $id = shift;
     my $field = shift;
 
-	my $sql = $self->db_fetch_document($field);
-    return scalar $self->{DOCUMENT_DBH}->selectrow_array($sql, undef, $id);
+    my $sql = $self->db_fetch_doc($field);
+    return scalar $self->{DOC_DBH}->selectrow_array($sql, undef, $id);
 }
 
 sub _words {
     my $self = shift;
-    my $document = shift;
+    my $doc = shift;
 
     # kill tags
-    $document =~ s/<.*?>/ /g;
+    $doc =~ s/<.*?>/ /g;
 
     # Decode HTML entities
     if ($self->{DECODE_HTML_ENTITIES}) {
-	$document = HTML::Entities::decode($document);
+	$doc = HTML::Entities::decode($doc);
     }
-    
-    $document = $self->_trans($document);
+
+    $doc = $self->_lc_and_unac($doc);
 
     # split words on any non-word character or on underscore
 
     return grep {
-	
 	$_ = substr($_, 0, $self->{MAX_WORD_LENGTH});
 	$_ =~ /[a-z0-9]+/ && not $self->_stoplisted($_)
-
-    } split(/[^a-zA-Z0-9]+/, $document);
+    } split(/[^a-zA-Z0-9]+/, $doc);
 }
 
-sub _ping_document {
+sub _ping_doc {
     my $self = shift;
     my $id = shift;
 
-    my $sql = $self->db_ping_document;
-    my $sth = $self->{DOCUMENT_DBH}->prepare($sql);
+    my $sql = $self->db_ping_doc;
+    my $sth = $self->{DOC_DBH}->prepare($sql);
     $sth->execute($id);
     return $sth->rows;
 }
@@ -1660,22 +1863,30 @@ sub _create_tables {
 
     # mask table
 
-    $self->db_drop_table($self->{MASK_TABLE});
     print "Dropping mask table ($self->{MASK_TABLE})\n"	if $PA;
+    $self->db_drop_table($self->{MASK_TABLE});
 
-    $sql = $self->db_create_mask;
+    $sql = $self->db_create_mask_table;
     print "Creating mask table ($self->{MASK_TABLE})\n" if $PA;
     $self->{INDEX_DBH}->do($sql);
 
     # max term frequency table
 
-    $self->db_drop_table($self->{MAXTF_TABLE});
     print "Dropping max term frequency table ($self->{MAXTF_TABLE})\n" if $PA;
+    $self->db_drop_table($self->{MAXTF_TABLE});
 
-    $sql = $self->db_create_maxterm;
+    $sql = $self->db_create_maxterm_table;
     print "Creating max term frequency table ($self->{MAXTF_TABLE})\n" if $PA;
     $self->{INDEX_DBH}->do($sql);
 
+    # docs vector table
+
+    print "Dropping docs vector table ($self->{MAXTF_TABLE})\n" if $PA;
+    $self->db_drop_table($self->{ALL_DOCS_VECTOR_TABLE});
+
+    $sql = $self->db_create_all_docs_vector_table;
+    print "Creating docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n" if $PA;
+    $self->{INDEX_DBH}->do($sql);
 
     # inverted tables
 
@@ -1683,7 +1894,7 @@ sub _create_tables {
 	$self->db_drop_table($table);
 	print "Dropping inverted table ($table)\n" if $PA;
 
-	$sql = $self->db_create_inverted($table);
+	$sql = $self->db_create_inverted_table($table);
 	print "Creating inverted table ($table)\n" if $PA;
 	$self->{INDEX_DBH}->do($sql);
     }
@@ -1702,14 +1913,13 @@ sub _create_tables {
 
 sub _stoplisted {
     my $self = shift;
-	my $word = shift;
-	
+    my $word = shift;
+
     if ($self->{STOPLIST} and $self->{STOPLISTED_WORDS}->{$word}) {
 	push(@{$self->{STOPLISTED_QUERY}}, $word);
 	print "stoplisting: $word\n" if $PA > 1;
 	return 1;
-    }
-    else {
+    } else {
 	return 0;
     }
 }
@@ -1727,10 +1937,10 @@ DBIx::TextIndex - Perl extension for full-text searching in SQL databases
  use DBIx::TextIndex;
 
  my $index = DBIx::TextIndex->new({
-     document_dbh => $document_dbh,
-     document_table => 'document_table',
-     document_fields => ['column_1', 'column_2'],
-     document_id_field => 'primary_key',
+     doc_dbh => $doc_dbh,
+     doc_table => 'doc_table',
+     doc_fields => ['column_1', 'column_2'],
+     doc_id_field => 'primary_key',
      index_dbh => $index_dbh,
      collection => 'collection_1',
      db => 'mysql',
@@ -1753,17 +1963,17 @@ DBIx::TextIndex - Perl extension for full-text searching in SQL databases
 
  $index->initialize;
 
- $index->add_document(\@document_ids);
+ $index->add_doc(\@doc_ids);
 
  my $results = $index->search({
      column_1 => '"a phrase" +and -not or',
      column_2 => 'more words',
  });
 
- foreach my $document_id
+ foreach my $doc_id
      (sort {$$results{$b} <=> $$results{$a}} keys %$results ) 
  {
-     print "DocumentID: $document_id Score: $$results{$document_id} \n";  
+     print "DocID: $doc_id Score: $$results{$doc_id} \n";
  }
 
  $index->delete;
@@ -1788,34 +1998,34 @@ The following methods are available:
 Constructor method.  The first time an index is created, the following
 arguments must be passed to new():
 
-my $index = DBIx::TextIndex->new({
-    document_dbh => $document_dbh,
-    document_table => 'document_table',
-    document_fields => ['column_1', 'column_2'],
-    document_id_field => 'primary_key',
-    index_dbh => $index_dbh,
-    collection => 'collection_1'
-});
+ my $index = DBIx::TextIndex->new({
+     doc_dbh => $doc_dbh,
+     doc_table => 'doc_table',
+     doc_fields => ['column_1', 'column_2'],
+     doc_id_field => 'primary_key',
+     index_dbh => $index_dbh,
+     collection => 'collection_1'
+ });
 
 Other arguments are optional.
 
 =over 4
 
-=item document_dbh
+=item doc_dbh
 
 DBI connection handle to database containing text documents
 
-=item document_table
+=item doc_table
 
 Name of database table containing text documents
 
-=item document_fields
+=item doc_fields
 
-Reference to a list of column names to be indexed from document_table
+Reference to a list of column names to be indexed from doc_table
 
-=item document_id_field
+=item doc_id_field
 
-Name of a unique integer key column in document_table
+Name of a unique integer key column in doc_table
 
 =item index_dbh
 
@@ -1839,7 +2049,7 @@ a phrase in form of:
 	":2 some phrase" => matches "some nice phrase"
 	":1 some phrase" => matches only exact "some phrase"
 	":10 some phrase" => matches "some [1..9 words] phrase"
-		
+
 	Defaults to ":1" when omitted.
 
 The proximity matches work only forwards, not backwards, that means:
@@ -1862,16 +2072,12 @@ This hash reference can be used to override default error messages.
 Please refer to the SYNOPSIS for meaning of the particular keys and
 values.
 
-=item language
-Accepts a value of 'en' or 'cz'. Default is 'en'.
+=item charset
+Default is 'iso-8859-1'.
 
-Passing 'cz' to language activates support for the Czech language.
-Operates in a diacritics insensitive manner. This option may also be
-usable for other iso-8859-2 based Slavic languages. Basically it
-converts both indices data and queries from iso-8859-2 to pure ASCII.
+Accented characters are converted to ASCII equivalents based on the charset.
 
-Requires module B<CzFast> that is available on CPAN in a directory of
-author "TRIPIE".
+Pass 'iso-8859-2' for Czech or other Slavic languages.
 
 =item stoplist
 
@@ -1885,7 +2091,7 @@ lower case.  Currently only two stoplists exist:
 
 =item max_word_length
 
-Specifies maximum word length resolution. Defaults to 12 characters.
+Specifies maximum word length resolution. Defaults to 20 characters.
 
 =item result_threshold
 
@@ -1907,18 +2113,18 @@ Activates STDOUT debugging. Higher value increases verbosity.
 =back
 
 After creating a new TextIndex for the first time, and after calling
-initialize(), only the index_dbh, document_dbh, and collection
+initialize(), only the index_dbh, doc_dbh, and collection
 arguments are needed to create subsequent instances of a TextIndex.
 
 =head2 $index->initialize
 
 This method creates all the inverted tables for the TextIndex in the
-database specified by document_dbh. This method should be called only
+database specified by doc_dbh. This method should be called only
 once when creating a new index! It drops all the inverted tables
 before creating new ones.
 
-initialize() also stores the document_table, document_fields,
-document_id_field, language, stoplist, error attributes,
+initialize() also stores the doc_table, doc_fields,
+doc_id_field, language, stoplist, error attributes,
 proximity_index, max_word_length, result_threshold, phrase_threshold
 and min_wildcard_length preferences in a special table called
 "collection," so subsequent calls to new() for a given collection do
@@ -1933,17 +2139,16 @@ Upgrades the collection table to the latest format. Usually does not
 need to be called by the programmer, because initialize() handles
 upgrades automatically.
 
-=head2 $index->add_document(\@document_ids)
+=head2 $index->add_doc(\@doc_ids)
 
-Add all the @documents_ids from document_id_field to the TextIndex.
-@document_ids must be sorted from lowest to highest.  All further
-calls to add_document() must use @document_ids higher than those
-previously added to the index.  Reindexing previously-indexed
+Add all the @docs_ids from doc_id_field to the TextIndex.
+All further calls to add_doc() must use @doc_ids higher than
+those previously added to the index.  Reindexing previously-indexed
 documents will yield unpredictable results!
 
-=head2 $index->remove_document(\@document_ids)
+=head2 $index->remove_doc(\@doc_ids)
 
-This method accepts a reference to an array of document ids as its
+This method accepts a reference to an array of doc ids as its
 parameter. The specified documents will be removed from the index, but
 not from the actual documents table that is being indexed. The
 documents itself must be accessible when you remove them from the
@@ -1957,52 +2162,68 @@ All space reserved in the proximity index is recovered.  Approx. 75%
 of space reserved in the inverted tables and max term frequency table
 is recovered.
 
-=head2 $index->disable_document(\@document_ids)
+=head2 $index->disable_doc(\@doc_ids)
 
 This method can be used to disable documents. Disabled documents are
 not included in search results. This method should be used to "remove"
 documents from the index. Disabled documents are not actually removed
 from the index, therefore its size will remain the same. It's
-recommended to rebuild the index when you remove a significant amount
+recommended to rebuild the index when you disable a significant amount
 of documents.
 
 =head2 $index->search(\%search_args)
 
-search() returns $results, a reference to a hash.  The keys of the
-hash are document ids, and the values are the relative scores of the
-documents.  If an error occured while searching, $results will be a
-scalar containing an error message.
+search() returns $results, a hash reference.  The keys of the
+hash are doc ids, and the values are the relative scores of the
+documents.  If an error occured while searching, search will throw
+a DBIx::TextIndex::Exception::Query object.
 
- $results = $index->search({
-     first_field => '+andword -notword orword "phrase words"',
-     second_field => ...
-     ...
- });
-
- if (ref $results) {
-     print "The score for $document_id is $results->{$document_id}\n";
+ eval {
+     $results = $index->search({
+         first_field => '+andword -notword orword "phrase words"',
+         second_field => ...
+         ...
+     });
+ };
+ if ($@) {
+     if ($@->isa('DBIx::TextIndex::Exception::Query') {
+         print "No results: " . $@->error . "\n";
+     } else {
+         # Something more drastic happened
+         $@->rethrow;
+     }
  } else {
-     print "Error: $results\n";
+     print "The score for $doc_id is $results->{$doc_id}\n";
  }
 
 =head2 $index->unscored_search(\%search_args)
 
-unscored_search() returns $document_ids, a reference to an array.  Since
+unscored_search() returns $doc_ids, a reference to an array.  Since
 the scoring algorithm is skipped, this method is much faster than search().
-If an error occured while searching $document_ids will be a scalar
-containing an error message.
+A DBIx::TextIndex::Exception::Query object will be thrown if the query is
+bad or no results are found.
 
- $document_ids = $index->unscored_search({
-     first_field => '+andword -notword orword "phrase words"',
-     second_field => ...
- });
-
- if (ref $document_ids) {
-     print "Here's all the document ids:\n";
-     map { print "$_\n" } @$document_ids;
+ eval {
+     $doc_ids = $index->unscored_search({
+         first_field => '+andword -notword orword "phrase words"',
+         second_field => ...
+     });
+ };
+ if ($@) {
+     if ($@->isa('DBIx::TextIndex::Exception::Query') {
+         print "No results: " . $@->error . "\n";
+     } else {
+         # Something more drastic happened
+         $@->rethrow;
+     }
  } else {
-     print "Error: $document_ids\n";
+     print "Here's all the doc ids:\n";
+     map { print "$_\n" } @$doc_ids;
  }
+
+=head2 @doc_ids = $index->all_docs_ids
+
+all_doc_ids() return a list of all doc_ids currently in the index.
 
 =head2 $index->stat
 
@@ -2022,7 +2243,7 @@ delete() removes the tables associated with a TextIndex from index_dbh.
 =head1 SUPPORT FOR SEARCH MASKS
 
 DBIx::TextIndex can apply boolean operations on arbitrary lists of
-document ids to search results.
+doc ids to search results.
 
 Take this table:
 
@@ -2034,17 +2255,17 @@ Take this table:
  5       blue      ...
  6       green     ...
 
-Masks that represent document ids for in each the three categories can
+Masks that represent doc ids for in each the three categories can
 be created:
 
-=head2 $index->add_mask($mask_name, \@document_ids);
+=head2 $index->add_mask($mask_name, \@doc_ids);
 
  $index->add_mask('green_category', [ 1, 2, 6 ]);
  $index->add_mask('blue_category', [ 3, 5 ]);
  $index->add_mask('red_category', [ 4 ]);
 
 The first argument is an arbitrary string, and the second is a
-reference to any array of documents ids that the mask name identifies.
+reference to any array of doc ids that the mask name identifies.
 
 mask operations are passed in a second argument hash reference to
 $index->search():
@@ -2085,7 +2306,7 @@ This would give return results only in blue category:
  $index->search(\%query_args,
                 { and_mask => ['blue_category'] });
 
-Instead of using named masks, lists of document ids can be passed on
+Instead of using named masks, lists of doc ids can be passed on
 the fly as array references.  This would give the same results as the
 previous example:
 
@@ -2175,7 +2396,7 @@ Contributions by Tomas Styblo, tripie@cpan.org.
 
 =head1 COPYRIGHT
 
-Copyright 1997, 1998, 1999, 2000, 2001 by Daniel Koch.
+Copyright 1997-2003 by Daniel Koch.
 All rights reserved.
 
 =head1 LICENSE

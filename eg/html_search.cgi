@@ -33,11 +33,11 @@ print $q->start_form, 'Search ',
     $q->submit,
     $q->end_form;
 
-my $document_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
+my $doc_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
 my $index_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
 
 my $index = DBIx::TextIndex->new({
-    document_dbh => $document_dbh,
+    doc_dbh => $doc_dbh,
     index_dbh => $index_dbh,
     collection => 'encantadas'
 });
@@ -62,7 +62,7 @@ if ($q->param()) {
         my $sql = qq(select doc_id, doc from textindex_doc
                 where doc_id in ($ids));
 
-        my $sth = $document_dbh->prepare($sql);
+        my $sth = $doc_dbh->prepare($sql);
         my %doc;
         my %context;
         $sth->execute;
@@ -75,7 +75,7 @@ if ($q->param()) {
         $sth->finish;
 
         print "<hr />\n";
-        print "<h1>Context of the query words in resulting documents:</h1>\n";
+        print "<h1>Context of the query words in resulting docs:</h1>\n";
 
         foreach my $doc_id(sort {$$results{$b} <=> $$results{$a}} keys %$results) {
             print "Paragraph: $doc_id  Score: $$results{$doc_id}<br>\n";
@@ -88,7 +88,7 @@ if ($q->param()) {
         }
 
         print "<hr />\n";
-        print "<h1>Content of resulting documents:</h1>\n";
+        print "<h1>Content of resulting docs:</h1>\n";
 
         print "<ul>\n";
         foreach my $doc_id(sort {$$results{$b} <=> $$results{$a}} keys %$results) {
@@ -103,6 +103,6 @@ if ($q->param()) {
     }
 }
 $index_dbh->disconnect;
-$document_dbh->disconnect;
+$doc_dbh->disconnect;
 
 print $q->end_html;

@@ -7,7 +7,7 @@ use strict;
 sub db_add_mask {
     my $self = shift;
     return <<END;
-replace into $self->{MASK_TABLE} (mask, documents_vector)
+replace into $self->{MASK_TABLE} (mask, docs_vector)
 values (?, ?)
 END
 
@@ -51,14 +51,14 @@ CREATE TABLE collection (
   collection varchar(30) NOT NULL default '',
   version decimal(10,2) NOT NULL default '0.00',
   max_indexed_id int(10) unsigned NOT NULL default '0',
-  document_table varchar(30) NOT NULL default '',
-  document_id_field varchar(30) NOT NULL default '',
-  document_fields varchar(250) NOT NULL default '',
-  language char(2) NOT NULL default '',
+  doc_table varchar(30) NOT NULL default '',
+  doc_id_field varchar(30) NOT NULL default '',
+  doc_fields varchar(250) NOT NULL default '',
+  charset varchar(50) NOT NULL default '',
   stoplist varchar(255) NOT NULL default '',
   proximity_index enum('0', '1') NOT NULL default '0',
-  error_quote_count varchar(255) NOT NULL default '',
   error_empty_query varchar(255) NOT NULL default '',
+  error_quote_count varchar(255) NOT NULL default '',
   error_no_results varchar(255) NOT NULL default '',
   error_no_results_stop varchar(255) NOT NULL default '',
   max_word_length int(10) unsigned NOT NULL default '0',
@@ -172,27 +172,27 @@ END
 
 sub db_phrase_scan_cz {
     my $self = shift;
-    my $result_documents = shift;
+    my $result_docs = shift;
     my $fno = shift;
 
     return <<END;
-select $self->{DOCUMENT_ID_FIELD}, $self->{DOCUMENT_FIELDS}->[$fno]
-from   $self->{DOCUMENT_TABLE}
-where  $self->{DOCUMENT_ID_FIELD} in ($result_documents)
+select $self->{DOC_ID_FIELD}, $self->{DOC_FIELDS}->[$fno]
+from   $self->{DOC_TABLE}
+where  $self->{DOC_ID_FIELD} in ($result_docs)
 END
 
 }
 
 sub db_phrase_scan {
     my $self = shift;
-    my $result_documents = shift;
+    my $result_docs = shift;
     my $fno = shift;
 
     return <<END;
-select $self->{DOCUMENT_ID_FIELD}
-from   $self->{DOCUMENT_TABLE}
-where  $self->{DOCUMENT_ID_FIELD} IN ($result_documents)
-       and $self->{DOCUMENT_FIELDS}->[$fno] like ?
+select $self->{DOC_ID_FIELD}
+from   $self->{DOC_TABLE}
+where  $self->{DOC_ID_FIELD} IN ($result_docs)
+       and $self->{DOC_FIELDS}->[$fno] like ?
 END
 
 }
@@ -209,12 +209,30 @@ END
 
 }
 
-sub db_occurence {
+sub db_fetch_all_docs_vector {
+    my $self = shift;
+    return <<END;
+SELECT all_docs_vector
+from $self->{ALL_DOCS_VECTOR_TABLE}
+END
+
+}
+
+sub db_update_all_docs_vector {
+    my $self = shift;
+    return <<END;
+REPLACE INTO $self->{ALL_DOCS_VECTOR_TABLE}
+(id, all_docs_vector)
+VALUES (1, ?)
+END
+}
+
+sub db_freq_d {
     my $self = shift;
     my $table = shift;
 
     return <<END;
-select occurence from $table
+select freq_d from $table
 where word = ?
 END
 
@@ -224,31 +242,43 @@ sub db_fetch_mask {
     my $self = shift;
 
     return <<END;
-select documents_vector
+select docs_vector
 from $self->{MASK_TABLE}
 where mask = ?
 END
 
 }
 
-sub db_fetch_documents {
+sub db_fetch_docs {
     my $self = shift;
     my $table = shift;
 
     return <<END;
-select documents
+select docs
 from $table
 where word = ?
 END
 
 }
 
-sub db_fetch_documents_vector {
+sub db_fetch_freq_and_docs_vector {
     my $self = shift;
     my $table = shift;
 
     return <<END;
-select documents_vector
+select freq_d, docs_vector
+from $table
+where word = ?
+END
+
+}
+
+sub db_fetch_docs_vector {
+    my $self = shift;
+    my $table = shift;
+
+    return <<END;
+select docs_vector
 from $table
 where word = ?
 END
@@ -267,25 +297,25 @@ END
 
 }
 
-sub db_ping_document {
+sub db_ping_doc {
     my $self = shift;
 
     return <<END;
 select 1
-from $self->{DOCUMENT_TABLE}
-where $self->{DOCUMENT_ID_FIELD} = ?
+from $self->{DOC_TABLE}
+where $self->{DOC_ID_FIELD} = ?
 END
 
 }
 
-sub db_fetch_document {
+sub db_fetch_doc {
     my $self = shift;
     my $field = shift;
 
     return <<END;
 select $field
-from $self->{DOCUMENT_TABLE}
-where $self->{DOCUMENT_ID_FIELD} = ?
+from $self->{DOC_TABLE}
+where $self->{DOC_ID_FIELD} = ?
 END
 
 }
@@ -306,7 +336,7 @@ sub db_inverted_replace {
 
     return <<END;
 replace into $table
-(word, occurence, documents_vector, documents)
+(word, freq_d, docs_vector, docs)
 values (?, ?, ?, ?)
 END
 
@@ -328,27 +358,27 @@ sub db_inverted_select {
     my $table = shift;
 
     return <<END;
-select occurence, documents_vector, documents
+select freq_d, docs_vector, docs
 from $table
 where word = ?
 END
 
 }
 
-sub db_create_mask {
+sub db_create_mask_table {
     my $self = shift;
 
     return <<END;
 create table $self->{MASK_TABLE} (
   mask             varchar(100)            not null,
-  documents_vector mediumblob 	           not null,
+  docs_vector mediumblob 	           not null,
   primary key 	   mask_key (mask)
 )
 END
 
 }
 
-sub db_create_maxterm {
+sub db_create_maxterm_table {
     my $self = shift;
 
     return <<END;
@@ -361,7 +391,20 @@ END
 
 }
 
-sub db_create_inverted {
+sub db_create_all_docs_vector_table {
+    my $self = shift;
+
+    return <<END;
+CREATE TABLE $self->{ALL_DOCS_VECTOR_TABLE} (
+  id               INT UNSIGNED            NOT NULL,
+  all_docs_vector  MEDIUMBLOB              NOT NULL,
+  UNIQUE KEY       id_key (id)
+)
+END
+}
+
+
+sub db_create_inverted_table {
     my $self = shift;
     my $table = shift;
     my $max_word = $self->{MAX_WORD_LENGTH};
@@ -369,9 +412,9 @@ sub db_create_inverted {
     return <<END;
 create table $table (
   word             varchar($max_word)      not null,
-  occurence 	   int unsigned 	   not null,
-  documents_vector mediumblob 		   not null,
-  documents	   mediumblob 		   not null,
+  freq_d 	   int unsigned 	   not null,
+  docs_vector mediumblob 		   not null,
+  docs	   mediumblob 		   not null,
   PRIMARY KEY 	   word_key (word)
 )
 END
@@ -382,13 +425,13 @@ sub db_pindex_search {
     my $self = shift;
     my $fno = shift;
     my $words = shift;
-    my $documents = shift;
+    my $docs = shift;
 
     return <<END;
-select word, document, pos
+select word, doc, pos
 from $self->{PINDEX_TABLES}->[$fno]
-where document in ($documents) and word in ($words)
-order by document
+where doc in ($docs) and word in ($words)
+order by doc
 END
 
 }
@@ -401,9 +444,9 @@ sub db_pindex_create {
     return <<END;
 create table $table (
   word		   varchar($max_word)	   not null,
-  document	   integer                 not null,
+  doc	           integer                 not null,
   pos		   integer		   not null,
-  index		   (document, word)
+  index		   (doc, word)
 )
 END
 
@@ -414,7 +457,7 @@ sub db_pindex_add {
     my $table = shift;
 
     return <<END;
-insert into $table (word, document, pos)
+insert into $table (word, doc, pos)
 values (?, ?, ?)
 END
 
@@ -423,11 +466,11 @@ END
 sub db_pindex_remove {
     my $self = shift;
     my $table = shift;
-    my $documents = shift;
+    my $docs = shift;
 
     return <<END;
 delete from $table
-where document in ($documents)
+where doc in ($docs)
 END
 
 }
@@ -438,7 +481,7 @@ sub db_total_words {
     my $table = shift;
 
     return <<END;
-select SUM(occurence)
+select SUM(freq_d)
 from $table
 END
 

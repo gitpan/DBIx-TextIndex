@@ -9,19 +9,19 @@ my $DB = 'DBI:mysql:test';
 my $DBAUTH = ':';
 
 
-my $document_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
+my $doc_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
 my $index_dbh = DBI->connect($DB, split(':', $DBAUTH, 2)) or die $DBI::errstr;
 
-my $sth = $document_dbh->prepare('select max(doc_id) from textindex_doc');
+my $sth = $doc_dbh->prepare('select max(doc_id) from textindex_doc');
 $sth->execute;
 my ($max_doc_id) = $sth->fetchrow_array;
 $sth->finish;
 
 my $index = DBIx::TextIndex->new({
-    document_dbh => $document_dbh,
-    document_table => 'textindex_doc',
-    document_fields => ['doc'],
-    document_id_field => 'doc_id',
+    doc_dbh => $doc_dbh,
+    doc_table => 'textindex_doc',
+    doc_fields => ['doc'],
+    doc_id_field => 'doc_id',
     index_dbh => $index_dbh,
     collection => 'encantadas',
     print_activity => 1,
@@ -29,9 +29,9 @@ my $index = DBIx::TextIndex->new({
 
 $index->initialize;
 
-$index->add_document([1 .. $max_doc_id]);
+$index->add_doc([1 .. $max_doc_id]);
 
-$document_dbh->disconnect;
+$doc_dbh->disconnect;
 $index_dbh->disconnect;
 
 print "Done.\n";
