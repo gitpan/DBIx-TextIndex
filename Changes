@@ -1,4 +1,5 @@
 Revision history for Perl extension DBIx::TextIndex.
+0.03 Added example scripts in examples/.
 
 0.02 Added or_mask_set.
 

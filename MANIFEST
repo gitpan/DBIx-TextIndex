@@ -4,3 +4,9 @@ Makefile.PL
 README
 TextIndex.pm
 test.pl
+examples/README
+examples/encantadas.txt
+examples/index.pl
+examples/load_sample.pl
+examples/search.cgi
+examples/search.pl

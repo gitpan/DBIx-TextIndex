@@ -109,6 +109,8 @@ DESCRIPTION
     delete() removes the tables associated with a TextIndex from index_dbh.
 
 CHANGES
+    0.03 Added example scripts in examples/.
+
     0.02 Added or_mask_sets.
 
     0.01 Initial public release. Should be considered beta, and methods may

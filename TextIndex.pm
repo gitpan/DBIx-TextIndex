@@ -5,7 +5,7 @@ use strict;
 use Bit::Vector;
 use Carp qw(carp croak);
 
-$DBIx::TextIndex::VERSION = '0.02';
+$DBIx::TextIndex::VERSION = '0.03';
 
 # Largest size word to be indexed
 my $MAX_WORD = 30;
@@ -1327,6 +1327,8 @@ if (ref $results) {
 delete() removes the tables associated with a TextIndex from index_dbh.
 
 =head1 CHANGES
+
+0.03 Added example scripts in examples/.
 
 0.02 Added or_mask_set.
 
