@@ -1,0 +1,4 @@
+Revision history for Perl extension DBIx::TextIndex.
+
+0.01 Initial public release.  Should be considered beta, and methods may be
+added or changed until the first stable release.
