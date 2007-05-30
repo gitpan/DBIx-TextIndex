@@ -1,8 +1,9 @@
 package DBIx::TextIndex::DBD::Pg;
 
 use strict;
+use warnings;
 
-our $VERSION = '0.25';
+our $VERSION = '0.26';
 
 use DBD::Pg;
 use base qw(DBIx::TextIndex::DBD);
@@ -126,7 +127,7 @@ INSERT INTO $self->{DOC_KEY_TABLE} (doc_key) VALUES (?)
 END
 
     $self->{INDEX_DBH}->do($sql, undef, $doc_key);
-    
+
     my ($doc_id) = $self->{INDEX_DBH}->selectrow_array(<<END);
 SELECT CURRVAL('$self->{DOC_KEY_TABLE}_doc_id_seq')
 END
@@ -223,4 +224,89 @@ sub drop_doc_key_table {
 }
 
 1;
+__END__
 
+=head1 NAME
+
+DBIx::TextIndex::DBD::Pg - Driver for PostgreSQL
+
+=head1 SYNOPSIS
+
+ require DBIx::TextIndex::DBD::Pg;
+
+=head1 DESCRIPTION
+
+Contains PostgreSQL-specific overrides for methods of
+L<DBIx::TextIndex::DBD>.
+
+Used internally by L<DBIx::TextIndex>.
+
+
+=head1 INTERFACE
+
+=head2 Restricted Methods
+
+=over
+
+=item C<add_mask>
+
+=item C<create_collection_table>
+
+=item C<update_all_docs_vector>
+
+=item C<update_docweights>
+
+=item C<update_docweights_execute>
+
+=item C<update_delete_queue>
+
+=item C<inverted_replace>
+
+=item C<inverted_replace_execute>
+
+=item C<insert_doc_key>
+
+=item C<create_mask_table>
+
+=item C<create_docweights_table>
+
+=item C<create_all_docs_vector_table>
+
+=item C<create_delete_queue_table>
+
+=item C<create_inverted_table>
+
+=item C<create_doc_key_table>
+
+=item C<drop_doc_key_table>
+
+=back
+
+
+=head1 AUTHOR
+
+Daniel Koch, dkoch@cpan.org.
+
+
+=head1 COPYRIGHT
+
+Copyright 1997-2007 by Daniel Koch.
+All rights reserved.
+
+
+=head1 LICENSE
+
+This package is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself, i.e., under the terms of the "Artistic
+License" or the "GNU General Public License".
+
+
+=head1 DISCLAIMER
+
+This package is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+See the "GNU General Public License" for more details.
+
+=cut

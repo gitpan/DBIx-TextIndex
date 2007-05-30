@@ -1,8 +1,9 @@
 package DBIx::TextIndex::QueryParser;
 
 use strict;
+use warnings;
 
-our $VERSION = '0.22';
+our $VERSION = '0.26';
 
 use base qw(DBIx::TextIndex);
 
@@ -30,6 +31,7 @@ sub term_fields {
 sub parse {
     my $self = shift;
     delete($self->{TERM_FIELDS});
+    delete($self->{STOPLISTED_QUERY});
     $self->_parse(@_);
 }
 
@@ -119,6 +121,7 @@ sub _parse {
 	$clause->{TERM} = $self->_lc_and_unac($term) if $term;
 	if ($clause->{TERM}) {
 	    next unless $clause->{TERM} =~ m/[a-z0-9]/;
+            next if $self->_stoplisted($clause->{TERM});
 	}
 	push @clauses, $clause;
     }
@@ -148,4 +151,76 @@ sub fold_nested_phrases {
     return wantarray ? @folded : \@folded;
 }
 
+sub stoplisted_query {
+    my $self = shift;
+    return ref $self->{STOPLISTED_QUERY} eq 'ARRAY' ?
+        $self->{STOPLISTED_QUERY} : [];
+}
+
 1;
+__END__
+
+=head1 NAME
+
+DBIx::TextIndex::QueryParser - Parser for user-supplied query strings
+
+
+=head1 SYNOPSIS
+
+ use DBIx::TextIndex::QueryParser;
+
+ my $parser = DBIx::TextIndex::QueryParser->new();
+
+ $parser->parse($query_string);
+
+
+=head1 DESCRIPTION
+
+Used internally by L<DBIx::TextIndex>, see that module's documentation
+for the query syntax.
+
+This class should not be used directly by client code.
+
+=head2 Restricted Methods
+
+=over
+
+=item C<fold_nested_phrases>
+
+=item C<new>
+
+=item C<parse>
+
+=item C<term_fields>
+
+=item C<stoplisted_query>
+
+=back
+
+=head1 AUTHOR
+
+Daniel Koch, dkoch@cpan.org.
+
+
+=head1 COPYRIGHT
+
+Copyright 1997-2007 by Daniel Koch.
+All rights reserved.
+
+
+=head1 LICENSE
+
+This package is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself, i.e., under the terms of the "Artistic
+License" or the "GNU General Public License".
+
+
+=head1 DISCLAIMER
+
+This package is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+See the "GNU General Public License" for more details.
+
+=cut

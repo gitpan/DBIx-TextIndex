@@ -21,7 +21,7 @@ SYNOPSIS
      });
 
      foreach my $key
-         (sort {$$results{$b} <=> $$results{$a}} keys %$results )
+         (sort {$$results{$b} <=> $$results{$a}} keys %$results ) 
      {
          print "Key: $key Score: $$results{$key} \n";
      }
@@ -32,13 +32,18 @@ DESCRIPTION
     support should work with minor adjustments to SQL statements in the
     module. MySQL, PostgreSQL, and SQLite are currently supported.
 
-    As of version 0.24, data from any source can be indexed by passing it to
-    the "add()" method as a string.
+    As of version 0.24, data from any source outside of a database can be
+    indexed by passing the data to the "add()" method as a string.
 
 CHANGES
 
-0.25
-    New methods indexed() and last_indexed_key()
+0.26
+    Fixed problem with re-indexing a document several times with
+    SQLite (rt.cpan.org #16247)
 
-    Removed a few stray print statements
+    Stoplists now work with QueryParser
 
+    unscored_search() was returning internal document ids instead of keys
+
+    Fixed table_exists() in case schema name is prefixed to table name
+    in results of DBI->tables() call

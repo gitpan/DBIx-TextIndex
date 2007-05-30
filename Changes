@@ -2,6 +2,17 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+0.26
+    Fixed problem with re-indexing a document several times with
+    SQLite (rt.cpan.org #16247)
+
+    Stoplists now work with QueryParser
+
+    unscored_search() was returning internal document ids instead of keys
+
+    Fixed table_exists() in case schema name is prefixed to table name
+    in results of DBI->tables() call
+
 0.25
     New methods indexed() and last_indexed_key()
 

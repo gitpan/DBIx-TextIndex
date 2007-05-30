@@ -1,52 +1,122 @@
-package DBIx::TextIndex::DBD::mysql;
+package DBIx::TextIndex::StopList::en;
 
 use strict;
 use warnings;
 
-our $VERSION = '0.26';
-
-use base qw(DBIx::TextIndex::DBD);
-
-sub insert_doc_key {
-    my $self = shift;
-    my $doc_key = shift;
-
-    my $sql = <<END;
-INSERT INTO $self->{DOC_KEY_TABLE} (doc_key) VALUES (?)
-END
-
-    $self->{INDEX_DBH}->do($sql, undef, $doc_key);
-    my $doc_id = $self->{INDEX_DBH}->{mysql_insertid};
-    return $doc_id;
-}
+our @words = qw(
+a
+about
+after
+all
+also
+an
+and
+any
+are
+as
+at
+be
+because
+been
+but
+by
+can
+could
+for
+from
+had
+has
+have
+he
+her
+his
+i
+if
+in
+into
+is
+it
+its
+last
+like
+many
+me
+miss
+more
+most
+much
+mr
+mrs
+ms
+my
+no
+not
+of
+on
+one
+only
+or
+other
+out
+over
+s
+says
+she
+should
+so
+some
+such
+than
+that
+the
+their
+them
+there
+these
+they
+this
+those
+thus
+to
+too
+up
+us
+you
+was
+we
+were
+when
+which
+who
+whose
+will
+with
+would
+);
 
 1;
 __END__
 
 =head1 NAME
 
-DBIx::TextIndex::DBD::mysql - Driver for MySQL
+DBIx::TextIndex::StopList::en - English-language stop list
+
 
 =head1 SYNOPSIS
 
- require DBIx::TextIndex::DBD::mysql;
+ require DBIx::TextIndex::StopList::en;
+
 
 =head1 DESCRIPTION
 
-Contains MySQL-specific overrides for methods of L<DBIx::TextIndex::DBD>.
+Contains a default list of English-language stop words
 
 Used internally by L<DBIx::TextIndex>.
 
 
 =head1 INTERFACE
 
-=head2 Restricted Methods
-
-=over
-
-=item C<insert_doc_key>
-
-=back
+None.
 
 
 =head1 AUTHOR

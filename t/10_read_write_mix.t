@@ -1,16 +1,17 @@
 use strict;
+use warnings;
 
 use Test::More;
 use DBI;
 use DBIx::TextIndex;
 
-if (defined $ENV{DBI_DSN}) {
+if (defined $ENV{DBIX_TEXTINDEX_DSN}) {
     plan tests => 10;
 } else {
-    plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
+    plan skip_all => '$ENV{DBIX_TEXTINDEX_DSN} must be defined to run tests.';
 }
 
-my $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 1 });
+my $dbh = DBI->connect($ENV{DBIX_TEXTINDEX_DSN}, $ENV{DBIX_TEXTINDEX_USER}, $ENV{DBIX_TEXTINDEX_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 1 });
 
 ok( defined $dbh && $dbh->ping );
 
@@ -20,7 +21,7 @@ if ($dbd eq 'mysql' or $dbd eq 'SQLite' or $dbd eq 'Pg') {
     my @tables = $dbh->tables(undef, undef, 'test_doc', 'table');
     my $table_exists = 0;
     foreach my $table (@tables) {
-	if ($table =~ m/^[\"\`]?test_doc[\"\`]?$/) {
+	if ($table =~ m/^.*\.?[\"\`]?test_doc[\"\`]?$/) {
 	    $table_exists = 1;
 	    last;
 	}
@@ -54,7 +55,6 @@ my $index = DBIx::TextIndex->new({
     doc_id_field => 'doc_id',
     index_dbh => $dbh,
     collection => 'test',
-    print_activity => 1,
 });
 
 ok( ref $index eq 'DBIx::TextIndex' );

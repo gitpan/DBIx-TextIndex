@@ -1,8 +1,9 @@
 package DBIx::TextIndex::DBD;
 
 use strict;
+use warnings;
 
-our $VERSION = '0.25';
+our $VERSION = '0.26';
 
 use base qw(DBIx::TextIndex);
 
@@ -15,7 +16,7 @@ my @FIELDS = qw(
 		doc_table
 		docweights_table
 		mask_table
-		max_word_length		
+		max_word_length
 		doc_key_sql_type
 		doc_key_length
 		);
@@ -47,7 +48,7 @@ sub table_exists {
     my $table = shift;
     my @tables = $self->{INDEX_DBH}->tables(undef, undef, $table, 'table');
     for (@tables) {
-	return 1 if m/^[\"\`]?$table[\"\`]?$/;
+	return 1 if m/^.*\.?[\"\`]?$table[\"\`]?$/;
     }
     return 0;
 }
@@ -621,3 +622,136 @@ sub drop_doc_key_table {
 }
 
 1;
+__END__
+
+=head1 NAME
+
+DBIx::TextIndex::DBD - Base class for database-specific SQL drivers
+
+=head1 SYNOPSIS
+
+Not for direct use, clients use L<DBIx::TextIndex>.
+
+=head1 DESCRIPTION
+
+This module is a base class for creating database drivers that
+encapsulate SQL calls specific to a given database.
+
+=head2 Restricted Methods
+
+=over
+
+=item C<add_mask>
+
+=item C<collection_count>
+
+=item C<create_all_docs_vector_table>
+
+=item C<create_collection_table>
+
+=item C<create_delete_queue_table>
+
+=item C<create_doc_key_table>
+
+=item C<create_docweights_table>
+
+=item C<create_inverted_table>
+
+=item C<create_mask_table>
+
+=item C<delete_collection_info>
+
+=item C<delete_doc_key_doc_ids>
+
+=item C<delete_mask>
+
+=item C<drop_doc_key_table>
+
+=item C<drop_table>
+
+=item C<fetch_all_collection_rows>
+
+=item C<fetch_all_docs_vector>
+
+=item C<fetch_collection_info>
+
+=item C<fetch_collection_version>
+
+=item C<fetch_delete_queue>
+
+=item C<fetch_doc>
+
+=item C<fetch_doc_all_fields>
+
+=item C<fetch_doc_id>
+
+=item C<fetch_doc_ids>
+
+=item C<fetch_doc_keys>
+
+=item C<fetch_docweights>
+
+=item C<fetch_mask>
+
+=item C<fetch_max_indexed_id>
+
+=item C<fetch_term_docs>
+
+=item C<fetch_term_freq_and_docs>
+
+=item C<fetch_term_pos>
+
+=item C<fetch_terms>
+
+=item C<insert_collection_table_row>
+
+=item C<insert_doc_key>
+
+=item C<inverted_replace>
+
+=item C<inverted_replace_execute>
+
+=item C<inverted_select>
+
+=item C<new>
+
+=item C<phrase_scan>
+
+=item C<phrase_scan_cz>
+
+=item C<ping_doc>
+
+=item C<store_collection_info>
+
+=item C<table_exists>
+
+=item C<total_terms>
+
+=item C<update_all_docs_vector>
+
+=item C<update_collection_info>
+
+=item C<update_delete_queue>
+
+=item C<update_docweights>
+
+=item C<update_docweights_execute>
+
+=back
+
+=head1 SEE ALSO
+
+L<DBIx::TextIndex>
+
+=head1 AUTHOR
+
+Daniel Koch <dkoch@cpan.org>
+
+=head1 COPYRIGHT
+
+Copyright (c) 2007 Daniel Koch.  All rights reserved.  This program is
+free software; you can redistribute it and/or modify it under the same
+terms as Perl itself.
+
+=cut
+

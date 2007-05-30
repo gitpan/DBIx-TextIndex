@@ -1,16 +1,17 @@
 use strict;
+use warnings;
 
 use Test::More;
 use DBI;
 use DBIx::TextIndex;
 
-if (defined $ENV{DBI_DSN}) {
+if (defined $ENV{DBIX_TEXTINDEX_DSN}) {
     plan tests => 5;
 } else {
-    plan skip_all => '$ENV{DBI_DSN} must be defined to run tests.';
+    plan skip_all => '$ENV{DBIX_TEXTINDEX_DSN} must be defined to run tests.';
 }
 
-my $dbh = DBI->connect($ENV{DBI_DSN}, $ENV{DBI_USER}, $ENV{DBI_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 1 });
+my $dbh = DBI->connect($ENV{DBIX_TEXTINDEX_DSN}, $ENV{DBIX_TEXTINDEX_USER}, $ENV{DBIX_TEXTINDEX_PASS}, { RaiseError => 1, PrintError => 0, AutoCommit => 1 });
 
 ok( defined $dbh && $dbh->ping );
 

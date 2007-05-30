@@ -1,8 +1,9 @@
 package DBIx::TextIndex::TermDocsCache;
 
 use strict;
+use warnings;
 
-our $VERSION = '0.22';
+our $VERSION = '0.26';
 
 use Bit::Vector;
 
@@ -120,3 +121,89 @@ sub _fetch_term_docs {
     ($self->{DOCFREQ_T}->[$fno]->{$term}, $self->{TERM_DOCS}->[$fno]->{$term})
 	= $self->{INDEX_DBH}->selectrow_array($sql, undef, $term);
 }
+
+__END__
+
+=head1 NAME
+
+DBIx::TextIndex::TermDocsCache - Cache object for term-documents vectors
+
+
+=head1 SYNOPSIS
+
+ use DBIx::TextIndex::TermDocsCache;
+
+ my $cache = DBIx::TextIndex::TermDocsCache->new((
+     db => $database_name,
+     index_dbh => $dbh,
+     max_indexed_id => $max_indexed_id,
+     inverted_tables => \@table_names,
+ });
+
+
+=head1 DESCRIPTION
+
+Used internally by L<DBIx::TextIndex>. For each term (word) in the
+inverted index, a list of documents containing that term is
+stored. This class caches reads of these term-documents vectors in
+memory.
+
+This class should not be used directly by client code.
+
+=head2 Restricted Methods
+
+=over
+
+=item C<f_t>
+
+=item C<flush_all>
+
+=item C<flush_bit_vectors>
+
+=item C<flush_term_docs>
+
+=item C<max_indexed_id>
+
+=item C<new>
+
+=item C<term_doc_ids_arrayref>
+
+=item C<term_docs>
+
+=item C<term_docs_arrayref>
+
+=item C<term_docs_hashref>
+
+=item C<term_pos>
+
+=item C<vector>
+
+=back
+
+=head1 AUTHOR
+
+Daniel Koch, dkoch@cpan.org.
+
+
+=head1 COPYRIGHT
+
+Copyright 1997-2007 by Daniel Koch.
+All rights reserved.
+
+
+=head1 LICENSE
+
+This package is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself, i.e., under the terms of the "Artistic
+License" or the "GNU General Public License".
+
+
+=head1 DISCLAIMER
+
+This package is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+See the "GNU General Public License" for more details.
+
+=cut

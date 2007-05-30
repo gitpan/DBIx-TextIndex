@@ -1,8 +1,9 @@
 package DBIx::TextIndex;
 
 use strict;
+use warnings;
 
-our $VERSION = '0.25';
+our $VERSION = '0.26';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -13,7 +14,7 @@ use DBIx::TextIndex::Exception qw(:all);
 use DBIx::TextIndex::QueryParser;
 use DBIx::TextIndex::TermDocsCache;
 use HTML::Entities ();
-use Data::Dumper;
+
 my $unac;
 BEGIN {
     eval { require Text::Unaccent; import Text::Unaccent qw(unac_string) };
@@ -235,10 +236,12 @@ sub new {
     if ($self->{STOPLIST} and ref($self->{STOPLIST})) {
 	$self->{STOPLISTED_WORDS} = {};
     	foreach my $stoplist (@{$self->{STOPLIST}}) {
-	    my $stopfile = 'DBIx/TextIndex/stop-' . $stoplist . '.pm';
-	    print "initializing stoplist: $stopfile\n" if $PA;
-	    require "$stopfile";
-            foreach my $word (@DBIx::TextIndex::stop::words) {
+	    my $stop_package = "DBIx::TextIndex::StopList::$stoplist";
+	    _log("initializing stoplist: $stop_package\n") if $PA;
+	    eval "require $stop_package";
+            no strict 'refs';
+            my @words =  @{$stop_package . '::words'};
+            foreach my $word (@words) {
             	$self->{STOPLISTED_WORDS}->{$word} = 1;
             }
         }
@@ -270,7 +273,11 @@ sub new {
     });
 
     # Query parser object 
-    $self->{QP} = DBIx::TextIndex::QueryParser->new({ charset => $self->{CHARSET} });
+    $self->{QP} = DBIx::TextIndex::QueryParser->new({
+        charset => $self->{CHARSET},
+        stoplist => $self->{STOPLIST},
+        stoplisted_words => $self->{STOPLISTED_WORDS}
+    });
 
     # Number of searches performed on this instance
     $self->{SEARCH_COUNT} = 0;
@@ -294,15 +301,20 @@ sub add_mask {
     my $vector = Bit::Vector->new($max_indexed_id + 1);
     $vector->Index_List_Store(@$ids);
 
-    print "Adding mask ($mask) to table $self->{MASK_TABLE}\n" if $PA > 1;
+    _log("Adding mask ($mask) to table $self->{MASK_TABLE}\n") if $PA > 1;
     $self->{DB}->add_mask($mask, $vector->to_Enum);
     return 1;
+}
+
+sub _log {
+    my @messages = @_;
+    print @messages;
 }
 
 sub delete_mask {
     my $self = shift;
     my $mask = shift;
-    print "Deleting mask ($mask) from table $self->{MASK_TABLE}\n" if $PA > 1;
+    _log("Deleting mask ($mask) from table $self->{MASK_TABLE}\n") if $PA > 1;
     $self->{INDEX_DBH}->do($self->{DB}->delete_mask, undef, $mask);
 }
 
@@ -327,14 +339,14 @@ sub add_doc {
 
     my $add_count_guess = $#$keys + 1;
     my $add_count = 0;
-    print "Adding $add_count_guess docs\n" if $PA;
+    _log("Adding $add_count_guess docs\n") if $PA;
 
     my @added_ids;
     my $batch_count = 0;
 
     foreach my $doc_key (@$keys) {
 	unless ($self->_ping_doc($doc_key)) {
-	    print "$doc_key skipped, no doc $doc_key found\n";
+	    _log("$doc_key skipped, no doc $doc_key found\n") if $PA;
 	    next;
 	}
 
@@ -367,41 +379,40 @@ sub _add_one {
     my $doc_id = $self->{DB}->fetch_doc_id($doc_key);
     if (defined $doc_id) {
 	# FIXME: need optimization if more than one doc is replaced at once
-	print "Replacing doc $doc_key\n" if $PA;
+	_log("Replacing doc $doc_key\n") if $PA;
 	$self->_remove($doc_id);
-    } 
+    }
     $doc_id = $self->{DB}->insert_doc_key($doc_key);
 
     my $do_prox = $self->{PROXIMITY_INDEX};
 
-    print "$doc_key - $doc_id" if $PA;
+    _log("$doc_key - $doc_id") if $PA;
 
     foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 	my $field = $self->{DOC_FIELDS}->[$fno];
-	print " $field" if $PA;
+	_log(" $field") if $PA;
 
 	my %positions;
 	my %frequency;
 
 	my @terms = $self->_terms($doc_fields->{$field});
 
-	# term count
-	my $tc = 1;
+	my $term_count = 1;
 	foreach my $term (@terms) {
-	    push @{$positions{$term}}, $tc if $do_prox;
+	    push @{$positions{$term}}, $term_count if $do_prox;
 	    $frequency{$term}++;
-	    $tc++;
+	    $term_count++;
 	}
-	print " $tc" if $PA;
+	_log(" $term_count") if $PA;
 	while (my ($term, $frequency) = each %frequency) {
 	    $self->_docs($fno, $term, $doc_id, $frequency);
 	    $self->_positions($fno, $term, $positions{$term}) if $do_prox;
 	}
 	# Doc weight
-	$self->{NEW_W_D}->[$fno]->[$doc_id] = $tc ?
-	    sprintf("%.5f", sqrt((1 + log($tc))**2)) : 0;
+	$self->{NEW_W_D}->[$fno]->[$doc_id] = $term_count ?
+	    sprintf("%.5f", sqrt((1 + log($term_count))**2)) : 0;
     } # end of field indexing
-    print "\n" if $PA;
+    _log("\n") if $PA;
     return $doc_id;
 }
 
@@ -483,9 +494,9 @@ sub _remove {
     return if $#$ids < 0;
 
     my $remove_count = $#$ids + 1;
-    print "Removing $remove_count docs\n" if $PA;
+    _log("Removing $remove_count docs\n") if $PA;
 
-    print "Removing docs from docweights table\n" if $PA;
+    _log("Removing docs from docweights table\n") if $PA;
     $self->_docweights_remove($ids);
 
     $self->_all_doc_ids_remove($ids);
@@ -570,6 +581,7 @@ sub search {
 	    unless exists $self->{FIELD_NO}->{$field};
 	my $fno = $self->{FIELD_NO}->{$field};
 	$self->{QUERY}->[$fno] = $self->{QP}->parse($query_string);
+        $self->{STOPLISTED_QUERY} = $self->{QP}->stoplisted_query;
 	foreach my $fld ($self->{QP}->term_fields) {
 	    if ($fld eq '__DEFAULT') {
 		$term_field_nos{$fno}++;
@@ -623,7 +635,7 @@ sub search {
     if ($args->{unscored_search}) {
 	my @result_docs = $self->{RESULT_VECTOR}->Index_List_Read;
 	throw_query( error => $ERROR{'no_results'} ) if $#result_docs < 0;
-	return \@result_docs;
+	return $self->{DB}->fetch_doc_keys(\@result_docs);
     }
 
     my $scoring_method = $args->{scoring_method} || $self->{SCORING_METHOD};
@@ -1052,6 +1064,7 @@ sub indexed {
     my $doc_key = shift;
 
     my $doc_ids = $self->{DB}->fetch_doc_ids([$doc_key]);
+
     if (ref $doc_ids) {
 	return $doc_ids->[0];
     } else {
@@ -1084,28 +1097,28 @@ sub delete {
 
     my $self = shift;
 
-    print "Deleting $self->{COLLECTION} from collection table\n" if $PA;
+    _log("Deleting $self->{COLLECTION} from collection table\n") if $PA;
     $self->_delete_collection_info;
 
-    print "Dropping mask table ($self->{MASK_TABLE})\n" if $PA;
+    _log("Dropping mask table ($self->{MASK_TABLE})\n") if $PA;
     $self->{DB}->drop_table($self->{MASK_TABLE});
 
-    print "Dropping docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
+    _log("Dropping docweights table ($self->{DOCWEIGHTS_TABLE})\n") if $PA;
     $self->{DB}->drop_table($self->{DOCWEIGHTS_TABLE});
 
-    print "Dropping docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n"
+    _log("Dropping docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n")
 	if $PA;
     $self->{DB}->drop_table($self->{ALL_DOCS_VECTOR_TABLE});
 
-   print "Dropping delete queue table ($self->{DELETE_QUEUE_TABLE})\n"
+    _log("Dropping delete queue table ($self->{DELETE_QUEUE_TABLE})\n")
 	if $PA;
     $self->{DB}->drop_table($self->{DELETE_QUEUE_TABLE});
 
-    print "Dropping doc key table ($self->{DOC_KEY_TABLE})\n" if $PA;
+    _log("Dropping doc key table ($self->{DOC_KEY_TABLE})\n") if $PA;
     $self->{DB}->drop_doc_key_table();
 
     foreach my $table ( @{$self->{INVERTED_TABLES}} ) {
-	print "Dropping inverted table ($table)\n" if $PA;
+	_log("Dropping inverted table ($table)\n") if $PA;
 	$self->{DB}->drop_table($table);
     }
 }
@@ -1119,7 +1132,7 @@ sub _create_collection_table {
     my $self = shift;
     my $sql = $self->{DB}->create_collection_table;
     $self->{INDEX_DBH}->do($sql);
-    print "Creating collection table (" . COLLECTION_TABLE . ")\n" if $PA;
+    _log("Creating collection table (" . COLLECTION_TABLE . ")\n") if $PA;
 }
 
 sub collection_count {
@@ -1133,9 +1146,9 @@ sub collection_count {
 sub _collection_table_upgrade_required {
     my $self = shift;
     my $version = 0;
-    print "Checking if collection table upgrade required ...\n" if $PA > 1;
+    _log("Checking if collection table upgrade required ...\n") if $PA > 1;
     unless ($self->collection_count) {
-	print "... Collection table contains no rows\n" if $PA > 1;
+	_log("... Collection table contains no rows\n") if $PA > 1;
 	return 0;
     }
     eval {
@@ -1144,15 +1157,15 @@ sub _collection_table_upgrade_required {
 	die $DBI::errstr if $DBI::errstr;
     };
     if ($@) {
-	print "... Problem fetching version column, must upgrade\n" if $PA > 1;
+	_log("... Problem fetching version column, must upgrade\n") if $PA > 1;
 	return 1;
     }
     if ($version && ($version < LAST_COLLECTION_TABLE_UPGRADE)) {
-	print "... Collection table version too low, must upgrade\n"
+	_log("... Collection table version too low, must upgrade\n")
 	    if $PA > 1;
 	return 1;
     }
-    print "... Collection table up-to-date\n" if $PA > 1;
+    _log("... Collection table up-to-date\n") if $PA > 1;
     return 0;
 }
 
@@ -1162,8 +1175,8 @@ sub upgrade_collection_table {
     $sth->execute;
     croak $sth->errstr if $sth->errstr;
     if ($sth->rows < 1) {
-	print "No rows in collection table, dropping collection table ("
-	    . COLLECTION_TABLE . ")\n" if $PA;
+	_log("No rows in collection table, dropping collection table ("
+	    . COLLECTION_TABLE . ")\n") if $PA;
 	$self->{DB}->drop_table(COLLECTION_TABLE);
 	$self->_create_collection_table;
 	return 1;
@@ -1173,10 +1186,10 @@ sub upgrade_collection_table {
 	push @table, $row;
     }
 
-    print "Upgrading collection table ...\n" if $PA;
-    print "... Dropping old collection table ...\n" if $PA;
+    _log("Upgrading collection table ...\n") if $PA;
+    _log("... Dropping old collection table ...\n") if $PA;
     $self->{DB}->drop_table(COLLECTION_TABLE);
-    print "... Recreating collection table ...\n" if $PA;
+    _log("... Recreating collection table ...\n") if $PA;
     $self->_create_collection_table;
 
     foreach my $old_row (@table) {
@@ -1207,7 +1220,7 @@ sub upgrade_collection_table {
 	    $new_row{doc_fields} = $old_row->{document_fields};
 	}
 
-	print "... Inserting collection ($new_row{collection})\n" if $PA;
+	_log("... Inserting collection ($new_row{collection})\n") if $PA;
 	$self->{DB}->insert_collection_table_row(\%new_row)
     }
     return 1;
@@ -1229,7 +1242,7 @@ sub _delete_collection_info {
 
     my $sql = $self->{DB}->delete_collection_info;
     $self->{INDEX_DBH}->do($sql, undef, $self->{COLLECTION});
-    print "Deleting collection $self->{COLLECTION} from collection table\n"
+    _log("Deleting collection $self->{COLLECTION} from collection table\n")
 	if $PA;
 }
 
@@ -1237,7 +1250,7 @@ sub _store_collection_info {
 
     my $self = shift;
 
-    print qq(Inserting collection $self->{COLLECTION} into collection table\n)
+    _log(qq(Inserting collection $self->{COLLECTION} into collection table\n))
 	if $PA;
 
     my $sql = $self->{DB}->store_collection_info;
@@ -1389,7 +1402,7 @@ sub _phrase_fullscan {
 	if ($self->{CZECH_LANGUAGE}) {
 	    $content = $self->_lc_and_unac($content);
 	    push(@found, $doc_id) if (index($content, $phrase) != -1);
-	    print "content scan for $doc_id, phrase = $phrase\n"
+	    _log("content scan for $doc_id, phrase = $phrase\n")
 		if $PA > 1;
 	} else {
 	    push(@found, $doc_id);
@@ -1470,7 +1483,12 @@ sub _search_okapi {
     my $result_min = $self->{RESULT_VECTOR}->Min;
 
     if ($result_max < 1) {
-	throw_query( error => $ERROR{no_results} );
+	if (not @{$self->{STOPLISTED_QUERY}}) {
+	    throw_query( error => $ERROR{no_results} );
+	}
+        else {
+	    throw_query( error => $self->_format_stoplisted_error );
+	}
     }
 
     foreach my $fno ( @{$self->{TERM_FIELD_NOS}} ) {
@@ -1491,7 +1509,8 @@ sub _search_okapi {
     unless (scalar keys %score) {
 	if (not @{$self->{STOPLISTED_QUERY}}) {
 	    throw_query( error => $ERROR{no_results} );
-	} else {
+	}
+        else {
 	    throw_query( error => $self->_format_stoplisted_error );
 	}
     }
@@ -1732,7 +1751,7 @@ sub _commit_docs {
     my ($sql, $sth);
     my $id_b = $self->{MAX_INDEXED_ID};
 
-    print "Storing doc weights\n" if $PA;
+    _log("Storing doc weights\n") if $PA;
 
     $self->_fetch_docweights(1);
 
@@ -1771,11 +1790,12 @@ sub _commit_docs {
     # Delete temporary in-memory structure
     delete($self->{NEW_W_D});
 
-    print "Committing inverted tables to database\n" if $PA;
+    _log("Committing inverted tables to database\n") if $PA;
 
     foreach my $fno ( 0 .. $#{$self->{DOC_FIELDS}} ) {
 
-	print("field$fno ", scalar keys %{$self->{TERM_DOCS_VINT}->[$fno]}, " distinct terms\n") if $PA;
+	_log("field$fno ", scalar keys %{$self->{TERM_DOCS_VINT}->[$fno]},
+             " distinct terms\n") if $PA;
 
 	my $s_sth;
 
@@ -1794,9 +1814,9 @@ sub _commit_docs {
 	while (my ($term, $term_docs_vint) =
 	       each %{$self->{TERM_DOCS_VINT}->[$fno]}) {
 
-	    print "$term\n" if $PA >= 2;
+	    _log("$term\n") if $PA >= 2;
 	    if ($PA && $tc > 0) {
-		print "committed $tc terms\n" if $tc % 500 == 0;
+		_log("committed $tc terms\n") if $tc % 500 == 0;
 	    }
 
 	    my $o_docfreq_t = 0;
@@ -1816,7 +1836,7 @@ sub _commit_docs {
 	    my $term_pos = $o_term_pos . $self->{TERM_POS}->[$fno]->{$term};
 
 	    $self->{DB}->inverted_replace_execute(
-		$i_sth, 
+		$i_sth,
 	        $term,
 		$self->{DOCFREQ_T}->[$fno]->{$term} + $o_docfreq_t,
 		$term_docs,
@@ -1827,7 +1847,8 @@ sub _commit_docs {
             delete($self->{TERM_POS}->[$fno]->{$term});
 	    $tc++;
 	}
-	print "committed $tc terms\n" if $PA && $tc > 0;
+        $i_sth->finish if $self->{DBD_TYPE} eq 'SQLite';
+	_log("committed $tc terms\n") if $PA && $tc > 0;
 	# Flush temporary hashes after data is stored
 	delete($self->{TERM_DOCS_VINT}->[$fno]);
 	delete($self->{TERM_POS}->[$fno]);
@@ -1901,7 +1922,8 @@ sub all_doc_ids {
 	$self->{ALL_DOCS_VECTOR}->Index_List_Store(@ids);
 	$self->{INDEX_DBH}->do($self->{DB}->update_all_docs_vector, undef,
 			       $self->{ALL_DOCS_VECTOR}->to_Enum);
-    } else {
+    }
+    else {
 	# FIXME: this is probably unnecessary, but older versions
 	# had this documented as a public method
 	return $self->{ALL_DOCS_VECTOR}->Index_List_Read;
@@ -1983,57 +2005,57 @@ sub _create_tables {
 
     # mask table
 
-    print "Dropping mask table ($self->{MASK_TABLE})\n"	if $PA;
+    _log("Dropping mask table ($self->{MASK_TABLE})\n") if $PA;
     $self->{DB}->drop_table($self->{MASK_TABLE});
 
     $sql = $self->{DB}->create_mask_table;
-    print "Creating mask table ($self->{MASK_TABLE})\n" if $PA;
+    _log("Creating mask table ($self->{MASK_TABLE})\n") if $PA;
     $self->{INDEX_DBH}->do($sql);
 
     # docweights table
 
-    print "Dropping docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
+    _log("Dropping docweights table ($self->{DOCWEIGHTS_TABLE})\n") if $PA;
     $self->{DB}->drop_table($self->{DOCWEIGHTS_TABLE});
 
     $sql = $self->{DB}->create_docweights_table;
-    print "Creating docweights table ($self->{DOCWEIGHTS_TABLE})\n" if $PA;
+    _log("Creating docweights table ($self->{DOCWEIGHTS_TABLE})\n") if $PA;
     $self->{INDEX_DBH}->do($sql);
 
     # docs vector table
 
-    print "Dropping docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n"
+    _log("Dropping docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n")
 	if $PA;
     $self->{DB}->drop_table($self->{ALL_DOCS_VECTOR_TABLE});
 
-    print "Creating docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n"
+    _log("Creating docs vector table ($self->{ALL_DOCS_VECTOR_TABLE})\n")
 	if $PA;
     $self->{INDEX_DBH}->do($self->{DB}->create_all_docs_vector_table);
 
     # delete queue table
 
-    print "Dropping delete queue table ($self->{DELETE_QUEUE_TABLE})\n"
+    _log("Dropping delete queue table ($self->{DELETE_QUEUE_TABLE})\n")
 	if $PA;
     $self->{DB}->drop_table($self->{DELETE_QUEUE_TABLE});
 
-    print "Creating delete queue table ($self->{DELETE_QUEUE_TABLE})\n"
+    _log("Creating delete queue table ($self->{DELETE_QUEUE_TABLE})\n")
 	if $PA;
     $self->{INDEX_DBH}->do($self->{DB}->create_delete_queue_table);
 
     # doc key table
 
-    print "Dropping doc key table ($self->{DOC_KEY_TABLE})\n" if $PA;
+    _log("Dropping doc key table ($self->{DOC_KEY_TABLE})\n") if $PA;
     $self->{DB}->drop_doc_key_table();
-    print "Creating doc key table ($self->{DOC_KEY_TABLE})\n" if $PA;
+    _log("Creating doc key table ($self->{DOC_KEY_TABLE})\n") if $PA;
     $self->{INDEX_DBH}->do($self->{DB}->create_doc_key_table);
 
     # inverted tables
 
     foreach my $table ( @{$self->{INVERTED_TABLES}} ) {
-	print "Dropping inverted table ($table)\n" if $PA;
+	_log("Dropping inverted table ($table)\n") if $PA;
 	$self->{DB}->drop_table($table);
 
 	$sql = $self->{DB}->create_inverted_table($table);
-	print "Creating inverted table ($table)\n" if $PA;
+	_log("Creating inverted table ($table)\n") if $PA;
 	$self->{INDEX_DBH}->do($sql);
     }
 }
@@ -2044,7 +2066,7 @@ sub _stoplisted {
 
     if ($self->{STOPLIST} and $self->{STOPLISTED_WORDS}->{$term}) {
 	push(@{$self->{STOPLISTED_QUERY}}, $term);
-	print "stoplisting: $term\n" if $PA > 1;
+	_log(" stoplisting: $term\n") if $PA > 1;
 	return 1;
     } else {
 	return 0;
@@ -2134,8 +2156,8 @@ columns stored in a database.  Almost any database with BLOB and DBI
 support should work with minor adjustments to SQL statements in the
 module.  MySQL, PostgreSQL, and SQLite are currently supported.
 
-As of version 0.24, data from any source can be indexed by passing it
-to the C<add()> method as a string.
+As of version 0.24, data from any source outside of a database can be
+indexed by passing the data to the C<add()> method as a string.
 
 =head1 INDEX CREATION
 
@@ -2331,11 +2353,113 @@ The option C<max_wildcard_term_expansion> specifies the maximum number
 of words a wildcard term can expand to before throwing a query
 exception.  The default is 30 words.
 
-=head1 USAGE
 
-The following methods are available:
+=head1 BOOLEAN SEARCH MASKS
 
-=head2 C<new()>
+DBIx::TextIndex can apply boolean operations on arbitrary lists of
+doc ids to search results.
+
+Take this table:
+
+ doc_id  category  doc_full_text
+ 1       green     full text here ...
+ 2       green     ...
+ 3       blue      ...
+ 4       red       ...
+ 5       blue      ...
+ 6       green     ...
+
+Masks that represent doc ids for in each the three categories can
+be created:
+
+=head2 C<add_mask()>
+
+ $index->add_mask($mask_name, \@doc_ids);
+
+ $index->add_mask('green_category', [ 1, 2, 6 ]);
+ $index->add_mask('blue_category', [ 3, 5 ]);
+ $index->add_mask('red_category', [ 4 ]);
+
+The first argument is an arbitrary string, and the second is a
+reference to any array of doc ids that the mask name identifies.
+
+Mask operations are passed in a second argument hash reference to
+$index->search():
+
+ %query_args = (
+     first_field => '+andword -notword orword "phrase words"',
+     second_field => ...
+     ...
+ );
+
+ %args = (
+     not_mask => \@not_mask_list,
+     and_mask => \@and_mask_list,
+     or_mask  => \@or_mask_list,
+     or_mask_set => [ \@or_mask_list_1, \@or_mask_list_2, ... ],
+ );
+
+ $index->search(\%query_args, \%args);
+
+=over 4
+
+=item not_mask
+
+For each mask in the not_mask list, the intersection of the search query results and all documents not in the mask is calculated.
+
+From our example above, to narrow search results to documents not in
+green category:
+
+ $index->search(\%query_args, { not_mask => ['green_category'] });
+
+=item and_mask
+
+For each mask in the and_mask list, the intersection of the search
+query results and all documents in the mask is calculated.
+
+This would give return results only in blue category:
+
+ $index->search(\%query_args,
+                { and_mask => ['blue_category'] });
+
+Instead of using named masks, lists of doc ids can be passed on
+the fly as array references.  This would give the same results as the
+previous example:
+
+ my @blue_ids = (3, 5);
+ $index->search(\%query_args,
+                { and_mask => [ \@blue_ids ] });
+
+=item or_mask_set
+
+With the or_mask_set argument, the union of all the masks in each list
+is computed individually, and then the intersection of each union set
+with the query results is calculated.
+
+=item or_mask
+
+An or_mask is treated as an or_mask_set with only one list. In
+this example, the union of blue_category and red_category is taken,
+and then the intersection of that union with the query results is
+calculated:
+
+ $index->search(\%query_args,
+                { or_mask => [ 'blue_category', 'red_category' ] });
+
+=back
+
+=head2 C<delete_mask()>
+
+ $index->delete_mask($mask_name);
+
+Deletes a single mask from the mask table in the database.
+
+
+=head1 INTERFACE
+
+=head2 Public Methods
+
+=head3 C<new()>
 
  $index = DBIx::TextIndex->new(\%args)
 
@@ -2352,7 +2476,7 @@ Other arguments are optional.
 
 C<new()> accepts these arguments:
 
-=over 4
+=over 8
 
 =item index_dbh
 
@@ -2544,7 +2668,7 @@ After creating a new TextIndex for the first time, and after calling
 initialize(), only the index_dbh, doc_dbh, and collection arguments
 are needed to create subsequent instances of a TextIndex.
 
-=head2 C<initialize()>
+=head3 C<initialize()>
 
  $index->initialize()
 
@@ -2563,7 +2687,7 @@ not need those arguments.
 Calling C<initialize()> will upgrade the collection table created by
 earlier versions of DBIx::TextIndex if necessary.
 
-=head2 C<add()>
+=head3 C<add()>
 
  $index->add($doc_key, \%doc_fields)
 
@@ -2572,7 +2696,7 @@ are field names and the values are strings to be indexed.  When
 C<search()> is called, and a hit for that document is scored,
 C<$doc_key> will be returned in the search results.
 
-=head2 C<begin_add()>
+=head3 C<begin_add()>
 
 Before performing a large number of <add()> operations in a loop, call
 C<begin_add()> to delay writing to the database until C<commit_add()>
@@ -2586,12 +2710,12 @@ number of documents held in memory before being committed to the
 database. If the limit is reached, the changes to the index will be
 comitted at that point.
 
-=head2 C<commit_add()>
+=head3 C<commit_add()>
 
 Commits a group of C<add()> operations to the database. It is only
 necessary to call this if C<begin_add()> was called first.
 
-=head2 C<add_doc()>
+=head3 C<add_doc()>
 
  $index->add_doc(\@doc_ids)
 
@@ -2602,7 +2726,11 @@ C<doc_dbh>.
 If C<@doc_ids> references documents that are already indexed, those
 documents will be re-indexed.
 
-=head2 C<remove()>
+=head3 C<add_document()>
+
+Deprecated, use C<add_doc()> instead.
+
+=head3 C<remove()>
 
  $index->remove(\@doc_keys)
 
@@ -2613,7 +2741,15 @@ The disk space used for the removed doc keys is not recovered, so an
 index rebuild is recommended after a significant amount of documents
 are removed.
 
-=head2 C<search()>
+=head3 C<remove_document()>
+
+Deprecated, use C<remove()>
+
+=head3 C<remove_doc()>
+
+Deprecated, use C<remove()>
+
+=head3 C<search()>
 
  $results = $index->search(\%args)
 
@@ -2640,7 +2776,7 @@ DBIx::TextIndex::Exception::Query object.
      print "The score for $doc_id is $results->{$doc_id}\n";
  }
 
-=head2 C<unscored_search()>
+=head3 C<unscored_search()>
 
  $doc_keys = $index->unscored_search(\%args)
 
@@ -2667,31 +2803,31 @@ bad or no results are found.
      map { print "$_\n" } @$doc_ids;
  }
 
-=head2 C<indexed()>
+=head3 C<indexed()>
 
  if ($index->indexed($doc_key)) { ... }
 
 Returns a number greater than zero if C<$index> contains C<$doc_key>.
 Returns C<0> if C<$doc_key> is not found.
 
-=head2 C<last_indexed_key()>
+=head3 C<last_indexed_key()>
 
  $key = $index->last_indexed_key()
 
 Returns the document key last added to the index. Useful for keeping
 track of documents added to the index in some sequential order
 
-=head2 C<optimize()>
+=head3 C<optimize()>
 
 FIXME: Implementation not complete
 
-=head2 C<delete()>
+=head3 C<delete()>
 
  $index->delete()
 
 C<delete()> removes the tables associated with a TextIndex from index_dbh.
 
-=head2 C<stat()>
+=head3 C<stat()>
 
 Allows you to obtain some meta information about the index. Accepts one
 parameter that specifies what you want to obtain.
@@ -2702,113 +2838,13 @@ Returns a total count of words in the index. This number
 may differ from the total count of words in the documents
 itself.
 
-=head2 C<upgrade_collection_table()>
+=head3 C<upgrade_collection_table()>
 
  $index->upgrade_collection_table()
 
 Upgrades the collection table to the latest format. Usually does not
 need to be called by the programmer, because initialize() handles
 upgrades automatically.
-
-=head1 BOOLEAN SEARCH MASKS
-
-DBIx::TextIndex can apply boolean operations on arbitrary lists of
-doc ids to search results.
-
-Take this table:
-
- doc_id  category  doc_full_text
- 1       green     full text here ...
- 2       green     ...
- 3       blue      ...
- 4       red       ...
- 5       blue      ...
- 6       green     ...
-
-Masks that represent doc ids for in each the three categories can
-be created:
-
-=head2 C<add_mask()>
-
- $index->add_mask($mask_name, \@doc_ids);
-
- $index->add_mask('green_category', [ 1, 2, 6 ]);
- $index->add_mask('blue_category', [ 3, 5 ]);
- $index->add_mask('red_category', [ 4 ]);
-
-The first argument is an arbitrary string, and the second is a
-reference to any array of doc ids that the mask name identifies.
-
-Mask operations are passed in a second argument hash reference to
-$index->search():
-
- %query_args = (
-     first_field => '+andword -notword orword "phrase words"',
-     second_field => ...
-     ...
- );
-
- %args = (
-     not_mask => \@not_mask_list,
-     and_mask => \@and_mask_list,
-     or_mask  => \@or_mask_list,
-     or_mask_set => [ \@or_mask_list_1, \@or_mask_list_2, ... ],
- );
-
- $index->search(\%query_args, \%args);
-
-=over 4
-
-=item not_mask
-
-For each mask in the not_mask list, the intersection of the search query results and all documents not in the mask is calculated.
-
-From our example above, to narrow search results to documents not in
-green category:
-
- $index->search(\%query_args, { not_mask => ['green_category'] });
-
-=item and_mask
-
-For each mask in the and_mask list, the intersection of the search
-query results and all documents in the mask is calculated.
-
-This would give return results only in blue category:
-
- $index->search(\%query_args,
-                { and_mask => ['blue_category'] });
-
-Instead of using named masks, lists of doc ids can be passed on
-the fly as array references.  This would give the same results as the
-previous example:
-
- my @blue_ids = (3, 5);
- $index->search(\%query_args,
-                { and_mask => [ \@blue_ids ] });
-
-=item or_mask_set
-
-With the or_mask_set argument, the union of all the masks in each list
-is computed individually, and then the intersection of each union set
-with the query results is calculated.
-
-=item or_mask
-
-An or_mask is treated as an or_mask_set with only one list. In
-this example, the union of blue_category and red_category is taken,
-and then the intersection of that union with the query results is
-calculated:
-
- $index->search(\%query_args,
-                { or_mask => [ 'blue_category', 'red_category' ] });
-
-=back
-
-=head2 C<delete_mask()>
-
- $index->delete_mask($mask_name);
-
-Deletes a single mask from the mask table in the database.
 
 =head1 RESULTS HIGHLIGHTING
 
@@ -2829,11 +2865,11 @@ for more information.
 
 =head1 AUTHOR
 
-Daniel Koch, dkoch@bizjournals.com.
+Daniel Koch, dkoch@cpan.org.
 
 =head1 COPYRIGHT
 
-Copyright 1997-2004 by Daniel Koch.
+Copyright 1997-2007 by Daniel Koch.
 All rights reserved.
 
 =head1 LICENSE

@@ -1,8 +1,9 @@
 package DBIx::TextIndex::DBD::SQLite;
 
 use strict;
+use warnings;
 
-our $VERSION = '0.25';
+our $VERSION = '0.26';
 
 use base qw(DBIx::TextIndex::DBD);
 
@@ -117,7 +118,7 @@ sub create_doc_key_table {
 
     return <<END;
 CREATE TABLE $self->{DOC_KEY_TABLE} (
-  doc_id           INTEGER               NOT NULL PRIMARY KEY,
+  doc_id           INTEGER               NOT NULL PRIMARY KEY AUTOINCREMENT,
   doc_key          $doc_key_sql_type     NOT NULL,
   UNIQUE (doc_key)
 )
@@ -125,6 +126,72 @@ END
 
 }
 
-
-
 1;
+__END__
+
+=head1 NAME
+
+DBIx::TextIndex::DBD::SQLite - Driver for SQLite
+
+=head1 SYNOPSIS
+
+ require DBIx::TextIndex::DBD::SQLite;
+
+=head1 DESCRIPTION
+
+Contains SQLite-specific overrides for methods of
+L<DBIx::TextIndex::DBD>.
+
+Used internally by L<DBIx::TextIndex>.
+
+=head1 INTERFACE
+
+=head2 Restricted Methods
+
+=over
+
+=item C<create_all_docs_vector_table>
+
+=item C<create_collection_table>
+
+=item C<create_delete_queue_table>
+
+=item C<create_doc_key_table>
+
+=item C<create_docweights_table>
+
+=item C<create_inverted_table>
+
+=item C<create_mask_table>
+
+=item C<update_docweights_execute>
+
+=back
+
+=head1 AUTHOR
+
+Daniel Koch, dkoch@cpan.org.
+
+
+=head1 COPYRIGHT
+
+Copyright 1997-2007 by Daniel Koch.
+All rights reserved.
+
+
+=head1 LICENSE
+
+This package is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself, i.e., under the terms of the "Artistic
+License" or the "GNU General Public License".
+
+
+=head1 DISCLAIMER
+
+This package is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+See the "GNU General Public License" for more details.
+
+=cut
