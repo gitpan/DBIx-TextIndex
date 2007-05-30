@@ -17,7 +17,7 @@ if ($have_sqlite) {
     plan tests => 9;
 }
 else {
-    plan skip_all => 'DBD::SQLite must be defined to run tests.';
+    plan skip_all => 'DBD::SQLite must be installed to run tests.';
 }
 
 my $dbh = DBI->connect('DBI:SQLite:dbname=./t/test12.db', '', '',

@@ -1,11 +1,14 @@
 use strict;
 use warnings;
 
-use Test::More qw(no_plan);
+use Test::More;
 
 eval "use Test::Pod::Coverage 1.08";
 plan skip_all => "Test::Pod::Coverage 1.08 required for testing POD coverage"
     if $@;
+
+my @modules = all_modules();
+plan tests => scalar @modules;
 
 my %private = (
     'DBIx::TextIndex' =>
@@ -34,7 +37,6 @@ my %private = (
                 term_docs_hashref
         ) ],
 );
-
 
 foreach my $module (all_modules()) {
     pod_coverage_ok($module, { also_private => $private{$module} });

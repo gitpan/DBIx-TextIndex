@@ -37,7 +37,12 @@ DESCRIPTION
 
 CHANGES
 
+0.27
+
+    Fixed POD coverage test error
+
 0.26
+
     Fixed problem with re-indexing a document several times with
     SQLite (rt.cpan.org #16247)
 

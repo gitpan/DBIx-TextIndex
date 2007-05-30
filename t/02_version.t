@@ -5,4 +5,4 @@ use Test::More tests => 2;
 
 BEGIN { use_ok('DBIx::TextIndex') };
 
-is(DBIx::TextIndex->VERSION, '0.26');
+is(DBIx::TextIndex->VERSION, '0.27');
