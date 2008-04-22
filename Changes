@@ -2,6 +2,10 @@ Revision history for Perl extension DBIx::TextIndex.
 
 =head1 CHANGES
 
+=head2 0.28
+
+    No changes, updated contact info
+
 =head2 0.27
 
     Fixed POD coverage test error

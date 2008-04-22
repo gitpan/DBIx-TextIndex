@@ -3,7 +3,7 @@ package DBIx::TextIndex;
 use strict;
 use warnings;
 
-our $VERSION = '0.27';
+our $VERSION = '0.28';
 
 require XSLoader;
 XSLoader::load('DBIx::TextIndex', $VERSION);
@@ -2912,7 +2912,7 @@ Bit::Vector is required by DBIx::TextIndex.
 
 Documentation is not complete.
 
-Please feel free to email me (dkoch@bizjournals.com) with any questions
+Please feel free to email me (dkoch@cpan.org) with any questions
 or suggestions.
 
 =head1 SEE ALSO
